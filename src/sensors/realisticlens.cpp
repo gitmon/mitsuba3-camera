@@ -375,30 +375,30 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
                 return si;
             }
 
-            // ray.o is either inside the sphere, or in front of it.
-            // TODO: handle concave/convex
-            // for a convex lens, take `near_t` if it's positive; 
-            // for concave, take `far_t`;
-            // otherwise, no intersection
-            Float t_intersect = dr::select(
-                active, dr::select(near_t < Float(0.0), Float(far_t), Float(near_t)),
-                dr::Infinity<Float>);
-            // std::cout << "a10\n";
+            // // ray.o is either inside the sphere, or in front of it.
+            // // TODO: handle concave/convex
+            // // for a convex lens, take `near_t` if it's positive; 
+            // // for concave, take `far_t`;
+            // // otherwise, no intersection
+            // Float t_intersect = dr::select(
+            //     active, dr::select(near_t < Float(0.0), Float(far_t), Float(near_t)),
+            //     dr::Infinity<Float>);
+            // // std::cout << "a10\n";
 
-            // Float t_intersect;
-            // if (m_is_convex) {
-            //     // convex case
-            //     // we are only testing intersection with the convex/near half of the sphere.
-            //     // if `near_t` is positive, the intersection is valid; otherwise, no intersection
-            //     active &= near_t >= Float(0.0);
-            //     t_intersect = dr::select(active, near_t, dr::Infinity<Float>);
-            // } 
-            // else {
-            //     // concave case
-            //     // take `far_t`. from the earlier bounds check, we know that `far_t` 
-            //     // is already positive, so it's a valid intersection
-            //     t_intersect = dr::select(active, Float(far_t), dr::Infinity<Float>);
-            // }
+            Float t_intersect;
+            if (m_is_convex) {
+                // convex case
+                // we are only testing intersection with the convex/near half of the sphere.
+                // if `near_t` is positive, the intersection is valid; otherwise, no intersection
+                active &= near_t >= Float(0.0);
+                t_intersect = dr::select(active, near_t, dr::Infinity<Float>);
+            } 
+            else {
+                // concave case
+                // take `far_t`. from the earlier bounds check, we know that `far_t` 
+                // is already positive, so it's a valid intersection
+                t_intersect = dr::select(active, Float(far_t), dr::Infinity<Float>);
+            }
 
             Point3f p_surface = ray(t_intersect);
             // std::cout << "a11\n";
@@ -508,7 +508,7 @@ public:
     }
 
     void build_lens() {
-        float aperture_radius = 100.f;
+        float aperture_radius = 5.f;
         float curvature_radius = 10.f;
         float z_intercept = 0.1f;
 
