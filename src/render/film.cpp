@@ -43,6 +43,11 @@ MI_VARIANT Film<Float, Spectrum>::Film(const Properties &props) : Object() {
         }
     }
 
+    // Physical size of film diagonal in meters, for realistic camera. 
+    // Default: 35mm
+    m_diagonal = 0.001f * props.get<float>("diagonal", 35.f);
+
+
     // Use a Gaussian reconstruction filter if none has been specified
     if (!m_filter)
         m_filter =
@@ -112,6 +117,7 @@ MI_VARIANT std::string Film<Float, Spectrum>::to_string() const {
         << "  crop_size = "   << m_crop_size   << "," << std::endl
         << "  crop_offset = " << m_crop_offset << "," << std::endl
         << "  sample_border = " << m_sample_border << "," << std::endl
+        << "  diagonal = "    << m_diagonal * 1000.f << "mm," << std::endl
         << "  m_filter = " << m_filter << std::endl
         << "]";
     return oss.str();

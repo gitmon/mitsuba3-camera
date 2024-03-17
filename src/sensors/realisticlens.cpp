@@ -230,12 +230,8 @@ template <typename Float, typename Spectrum>
 class LensInterface {
     public:
     MI_IMPORT_TYPES()
-        // TODO: change to thickness-based description
-        // LensInterface(Float aperture_radius, Float thickness, DispersiveMaterial<Float>* material) : 
-        // m_aperture_radius(aperture_radius), m_thickness(thickness), m_material(material) {}
-
         LensInterface(float aperture_radius, float z_intercept, DispersiveMaterial<Float> int_material, DispersiveMaterial<Float> ext_material) : 
-        m_z_intercept(z_intercept), m_aperture_radius(aperture_radius), m_thickness(0.f), m_int_material(int_material), m_ext_material(ext_material) {}
+        m_z_intercept(z_intercept), m_aperture_radius(aperture_radius), m_int_material(int_material), m_ext_material(ext_material) {}
 
         virtual ~LensInterface() = default;
 
@@ -243,7 +239,15 @@ class LensInterface {
 
         virtual Normal3f normal(const Point3f &p) const = 0;
 
-        Ray3f compute_interaction(const Ray3f &ray, Mask active) {
+        float get_radius() const {
+            return m_aperture_radius;
+        }
+
+        float get_z() const {
+            return m_z_intercept;
+        }
+
+        Ray3f compute_interaction(const Ray3f &ray, Mask &active) {
             // std::cout << "hi\n";
             // std::cout << active << std::endl;
             Interaction3f si = intersect(ray, active);
@@ -276,6 +280,7 @@ class LensInterface {
             // std::cout << "hi6\n";
 
             // std::cout << "c_i: " << cos_theta_i << ", c_o: " << cos_theta_t << ", eta: " << eta_ti << "\n";
+            // std::cout << ", eta: " << eta_ti << ", ";
             // std::cout << "nnn: " << si.n.x() << ", " << si.n.y() << ", " << si.n.z() << "\n";
 
             // if internal reflection occurs, early termination
@@ -307,7 +312,6 @@ class LensInterface {
         float m_z_intercept;
     private:
         float m_aperture_radius;
-        float m_thickness;
         DispersiveMaterial<Float> m_int_material, m_ext_material;
 };
 
@@ -375,16 +379,7 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
                 return si;
             }
 
-            // // ray.o is either inside the sphere, or in front of it.
-            // // TODO: handle concave/convex
-            // // for a convex lens, take `near_t` if it's positive; 
-            // // for concave, take `far_t`;
-            // // otherwise, no intersection
-            // Float t_intersect = dr::select(
-            //     active, dr::select(near_t < Float(0.0), Float(far_t), Float(near_t)),
-            //     dr::Infinity<Float>);
-            // // std::cout << "a10\n";
-
+            // ray.o is either inside the sphere, or in front of it.
             Float t_intersect;
             if (m_is_convex) {
                 // convex case
@@ -476,41 +471,47 @@ public:
 
         build_lens();
 
-        float r = 10.f;
-        float xmin, ymin, xmax, ymax;
-        xmin = ymin = 0.f;
-        xmax = ymax = r;
-        int N = 20;
-        float dx = (xmax - xmin) / ((float) N - 1.f);
+        // float r = 6.f;
+        // float xmin, ymin, xmax, ymax;
+        // xmin = ymin = 0.f;
+        // xmax = ymax = r;
+        // int N = 20;
+        // float dx = (xmax - xmin) / ((float) N - 1.f);
 
-        for (int i = 0; i < N; ++i) {
-            for (int j = 0; j < N; ++j) {
-                Vector3f o(i * dx, j * dx, 0.f);
-                Vector3f d(0.f, 0.f, 1.f);
-                Ray3f ray = Ray3f(o, d);
+        // for (int i = 0; i < N; ++i) {
+        //     for (int j = 0; j < N; ++j) {
+        //         Vector3f o(i * dx, j * dx, 0.f);
+        //         Vector3f d(0.f, 0.f, 1.f);
+        //         Ray3f ray = Ray3f(o, d);
 
-                std::cout   << ray.o.x() << ", " 
-                            << ray.o.y() << ", " 
-                            << ray.o.z() << ", " 
-                            << ray.d.x() << ", "
-                            << ray.d.y() << ", "
-                            << ray.d.z() << ", ";
-                auto [ray_out, active] = trace_ray_through_lens(ray);
-                std::cout   << ray_out.o.x() << ", " 
-                            << ray_out.o.y() << ", " 
-                            << ray_out.o.z() << ", " 
-                            << ray_out.d.x() << ", "
-                            << ray_out.d.y() << ", "
-                            << ray_out.d.z() << "\n";
-            }
-        }
-        std::cout << std::endl;
+        //         std::cout   << ray.o.x() 
+        //             << ", " << ray.o.y() 
+        //             << ", " << ray.o.z() 
+        //             << ", " << ray.d.x()
+        //             << ", " << ray.d.y()
+        //             << ", " << ray.d.z();
+        //         auto [ray_out, active] = trace_ray_through_lens(ray);
+        //         std::cout   << "\n";
+        //         // std::cout   << ray_out.o.x() << ", " 
+        //         //             << ray_out.o.y() << ", " 
+        //         //             << ray_out.o.z() << ", " 
+        //         //             << ray_out.d.x() << ", "
+        //         //             << ray_out.d.y() << ", "
+        //         //             << ray_out.d.z() << "\n";
+        //     }
+        // }
+        // std::cout << std::endl;
     }
 
     void build_lens() {
-        float aperture_radius = 5.f;
-        float curvature_radius = 10.f;
-        float z_intercept = 0.1f;
+        // float aperture_radius = 5.f;
+        // float curvature_radius = 10.f;
+        // float z_intercept = 0.1f;
+        float aperture_radius = 0.001f;
+        float curvature_radius = 1.f;
+        float z_intercept = 0.02f;
+
+        float thickness = 0.005f;
 
         // TODO: change to `new MyClass()` ? 
         DispersiveMaterial<Float> air_material = DispersiveMaterial<Float>(1.0f, 0.0f);
@@ -521,22 +522,43 @@ public:
         // auto lens = std::make_unique<SphericalLensInterface<Float, Spectrum>>(curvature_radius, aperture_radius, z_intercept, air_material, glass_material);
         // m_interfaces.push_back(std::move(lens));
 
-        auto lens = new SphericalLensInterface<Float, Spectrum>(curvature_radius, aperture_radius, z_intercept, glass_material, air_material);
-        m_interfaces.push_back(lens);
+        // auto lens1 = new SphericalLensInterface<Float, Spectrum>(curvature_radius, aperture_radius, z_intercept, glass_material, air_material);
+        // m_interfaces.push_back(lens1);
+        // auto lens2 = new SphericalLensInterface<Float, Spectrum>(-curvature_radius, aperture_radius, z_intercept + 2 * curvature_radius, air_material, glass_material);
+        // m_interfaces.push_back(lens2);
+        auto lens2 = new SphericalLensInterface<Float, Spectrum>(-curvature_radius, aperture_radius, z_intercept + thickness, air_material, glass_material);
+        m_interfaces.push_back(lens2);
 
         for (const auto &interface : m_interfaces) {
             std::cout << interface->to_string() << std::endl;
         }
+
+        m_lens_aperture_z = m_interfaces[0]->get_z();
+        m_lens_aperture_radius = m_interfaces[0]->get_radius();
     }
 
-    std::tuple<Ray3f, Mask> trace_ray_through_lens(const Ray3f &ray) {
+    std::tuple<Ray3f, Mask> trace_ray_through_lens(const Ray3f &ray) const {
         Mask active = true;
         Ray3f ray_(ray);
+        // std::cout << active << ", ";
         for (const auto &interface : m_interfaces) {
-            // std::cout << ray.o << ", " << ray.d << std::endl;
-            ray_ = interface->compute_interaction(ray_, active);
+
+            // TODO: is it better to mask?
+            // TODO: actually, replace this with a dr::loop! then while-loop through
+            // all the lens elements and add `&& active` to the conditional. rays that
+            // fail will terminate early and have active == false
+                        // ray_ = interface->compute_interaction(ray_, active);
+            dr::masked(ray_, active) = interface->compute_interaction(ray_, active);
+            // std::cout   << ", " << ray_.o.x() 
+            //             << ", " << ray_.o.y() 
+            //             << ", " << ray_.o.z() 
+            //             << ", " << ray_.d.x()
+            //             << ", " << ray_.d.y()
+            //             << ", " << ray_.d.z();
         }
+        // std::cout << active << std::endl;
         // std::cout << ray_.o << ", " << ray_.d << std::endl;
+        
         return { ray_, active };
     }
 
@@ -602,83 +624,151 @@ public:
         ray.time = time;
         ray.wavelengths = wavelengths;
 
-        // Compute the sample position on the near plane (local camera space).
-        Point3f near_p = m_sample_to_camera *
-                        Point3f(position_sample.x(), position_sample.y(), 0.f);
-
-        // Aperture position
-        Point2f tmp = m_aperture_radius * warp::square_to_uniform_disk_concentric(aperture_sample);
-        Point3f aperture_p(tmp.x(), tmp.y(), 0.f);
-
-        // Sampled position on the focal plane
-        Point3f focus_p = near_p * (m_focus_distance / near_p.z());
-
-        // Convert into a normalized ray direction; adjust the ray interval accordingly.
-        Vector3f d = dr::normalize(Vector3f(focus_p - aperture_p));
-
-        ray.o = m_to_world.value().transform_affine(aperture_p);
-        ray.d = m_to_world.value() * d;
-
-        Float inv_z = dr::rcp(d.z());
-        Float near_t = m_near_clip * inv_z,
-              far_t  = m_far_clip * inv_z;
-        ray.o += ray.d * near_t;
-        ray.maxt = far_t - near_t;
-
-        return { ray, wav_weight };
-    }
-
-    // NOTE: can we remove this and fallback to the default `sample_ray_differential()` implementation
-    // in sensor.cpp?
-    // TODO: figure out the stuff about `METHOD_NAME` vs `METHOD_NAME_impl`
-    std::pair<RayDifferential3f, Spectrum>
-    sample_ray_differential_impl(Float time, Float wavelength_sample,
-                                 const Point2f &position_sample, const Point2f &aperture_sample,
-                                 Mask active) const {
-        MI_MASKED_FUNCTION(ProfilerPhase::EndpointSampleRay, active);
-
-        auto [wavelengths, wav_weight] =
-            sample_wavelengths(dr::zeros<SurfaceInteraction3f>(),
-                               wavelength_sample,
-                               active);
-        RayDifferential3f ray;
-        ray.time = time;
-        ray.wavelengths = wavelengths;
+        Point2f film_size = m_film->get_physical_size();
+        Float xmax = film_size.x();
+        Float ymax = film_size.y();
+        
+        // STAGE 1: FILM SAMPLING
 
         // Compute the sample position on the near plane (local camera space).
-        Point3f near_p = m_sample_to_camera *
-                        Point3f(position_sample.x(), position_sample.y(), 0.f);
+        // Point3f near_p = m_sample_to_camera *
+        //                 Point3f(position_sample.x(), position_sample.y(), 0.f);
+        // ------------------------
 
-        // Aperture position
-        Point2f tmp = m_aperture_radius * warp::square_to_uniform_disk_concentric(aperture_sample);
-        Point3f aperture_p(tmp.x(), tmp.y(), 0.f);
+        // Compute the sample position on the near plane. For RealisticCamera, this is 
+        // the physical location of a point on the film, expressed in local camera space. 
+        // The film occupies [-xmax, xmax] x [-ymax, ymax] x [0,0]. Meanwhile, 
+        // `position_sample` is a uniform 2D sample distributed on [0,1]^2.
+        Point3f near_p = Point3f(-xmax + 2 * xmax * position_sample.x(), 
+                                 -ymax + 2 * ymax * position_sample.y(), 
+                                 0.f);
+        // Point3f near_p = Point3f(0.f);
 
-        // Sampled position on the focal plane
-        Float f_dist = m_focus_distance / near_p.z();
-        Point3f focus_p   = near_p          * f_dist,
-                focus_p_x = (near_p + m_dx) * f_dist,
-                focus_p_y = (near_p + m_dy) * f_dist;
+        // std::cout << near_p_ << "\t, " << near_p << std::endl;
 
-        // Convert into a normalized ray direction; adjust the ray interval accordingly.
-        Vector3f d = dr::normalize(Vector3f(focus_p - aperture_p));
+        // STAGE 2: APERTURE SAMPLING
 
-        ray.o = m_to_world.value().transform_affine(aperture_p);
-        ray.d = m_to_world.value() * d;
+        // // Aperture position
+        // Point2f tmp = m_aperture_radius * warp::square_to_uniform_disk_concentric(aperture_sample);
+        // Point3f aperture_p(tmp.x(), tmp.y(), 0.f);
+        // ------------------------
 
-        Float inv_z = dr::rcp(d.z());
+        // Sample the exit pupil
+        Point2f tmp = m_lens_aperture_radius * warp::square_to_uniform_disk_concentric(aperture_sample);
+        Point3f aperture_p(tmp.x(), tmp.y(), m_lens_aperture_z);
+        // Point3f aperture_p(0.f, 0.f, m_lens_aperture_z);
+
+        // STAGE 3: RAY SETUP
+
+        // // Sampled position on the focal plane
+        // Point3f focus_p = near_p * (m_focus_distance / near_p.z());
+
+        // // Convert into a normalized ray direction; adjust the ray interval accordingly.
+        // Vector3f d = dr::normalize(Vector3f(focus_p - aperture_p));
+        // ray.o = m_to_world.value().transform_affine(aperture_p);
+        // ray.d = m_to_world.value() * d;
+
+        // Float inv_z = dr::rcp(d.z());
+        // Float near_t = m_near_clip * inv_z,
+        //       far_t  = m_far_clip * inv_z;
+        // ray.o += ray.d * near_t;
+        // ray.maxt = far_t - near_t;
+        // ------------------------
+
+        // Set up the film->pupil ray. The ray starts at `aperture_p` and is directed
+        //  along the vector connecting `film_p` and `aperture_p`
+        Vector3f d = dr::normalize(Vector3f(aperture_p - near_p));
+        ray.o = aperture_p;
+        ray.d = d;
+
+        // std::cout << ray.o << std::endl;
+
+        // Trace the ray through the lens
+        auto [ray_out, active_out] = trace_ray_through_lens(ray);
+        Vector3f d_out(ray_out.d);
+
+        // std::cout << active_out << ", " << active << ", " << wav_weight << std::endl;
+
+        active &= active_out;
+
+        // Kill rays that don't get through the lens
+        // TODO
+        dr::masked(wav_weight, !active) = dr::zeros<Spectrum>();
+
+
+        // Convert ray_out from camera to world space
+        // dr::masked(ray_out, active) = m_to_world.value() * ray_out;
+        // ray_out = m_to_world.value() * ray_out;
+        ray_out.o = m_to_world.value().transform_affine(ray_out.o);
+        ray_out.d = m_to_world.value() * ray_out.d;
+        // ------------------------
+
+        // STAGE 4: POST-PROCESS
+        // handle z-clipping
+        // NOTE: the direction `d` in inv_z should be in the camera frame, i.e. before `m_to_world` is applied
+        Float inv_z = dr::rcp(d_out.z());
         Float near_t = m_near_clip * inv_z,
               far_t  = m_far_clip * inv_z;
-        ray.o += ray.d * near_t;
-        ray.maxt = far_t - near_t;
+        ray_out.o += ray_out.d * near_t;
+        ray_out.maxt = far_t - near_t;
 
-        ray.o_x = ray.o_y = ray.o;
 
-        ray.d_x = m_to_world.value() * dr::normalize(Vector3f(focus_p_x - aperture_p));
-        ray.d_y = m_to_world.value() * dr::normalize(Vector3f(focus_p_y - aperture_p));
-        ray.has_differentials = true;
+        // std::cout << ray_out.o << ",\t" << ray_out.d << ",\t" << ray_out.maxt << std::endl;
 
-        return { ray, wav_weight };
+        return { ray_out, wav_weight };
     }
+
+    // // NOTE: can we remove this and fallback to the default `sample_ray_differential()` implementation
+    // // in sensor.cpp?
+    // // TODO: figure out the stuff about `METHOD_NAME` vs `METHOD_NAME_impl`
+    // std::pair<RayDifferential3f, Spectrum>
+    // sample_ray_differential_impl(Float time, Float wavelength_sample,
+    //                              const Point2f &position_sample, const Point2f &aperture_sample,
+    //                              Mask active) const {
+    //     MI_MASKED_FUNCTION(ProfilerPhase::EndpointSampleRay, active);
+
+    //     auto [wavelengths, wav_weight] =
+    //         sample_wavelengths(dr::zeros<SurfaceInteraction3f>(),
+    //                            wavelength_sample,
+    //                            active);
+    //     RayDifferential3f ray;
+    //     ray.time = time;
+    //     ray.wavelengths = wavelengths;
+
+    //     // Compute the sample position on the near plane (local camera space).
+    //     Point3f near_p = m_sample_to_camera *
+    //                     Point3f(position_sample.x(), position_sample.y(), 0.f);
+
+    //     // Aperture position
+    //     Point2f tmp = m_aperture_radius * warp::square_to_uniform_disk_concentric(aperture_sample);
+    //     Point3f aperture_p(tmp.x(), tmp.y(), 0.f);
+
+    //     // Sampled position on the focal plane
+    //     Float f_dist = m_focus_distance / near_p.z();
+    //     Point3f focus_p   = near_p          * f_dist,
+    //             focus_p_x = (near_p + m_dx) * f_dist,
+    //             focus_p_y = (near_p + m_dy) * f_dist;
+
+    //     // Convert into a normalized ray direction; adjust the ray interval accordingly.
+    //     Vector3f d = dr::normalize(Vector3f(focus_p - aperture_p));
+
+    //     ray.o = m_to_world.value().transform_affine(aperture_p);
+    //     ray.d = m_to_world.value() * d;
+
+    //     Float inv_z = dr::rcp(d.z());
+    //     Float near_t = m_near_clip * inv_z,
+    //           far_t  = m_far_clip * inv_z;
+    //     ray.o += ray.d * near_t;
+    //     ray.maxt = far_t - near_t;
+
+    //     ray.o_x = ray.o_y = ray.o;
+
+    //     ray.d_x = m_to_world.value() * dr::normalize(Vector3f(focus_p_x - aperture_p));
+    //     ray.d_y = m_to_world.value() * dr::normalize(Vector3f(focus_p_y - aperture_p));
+    //     ray.has_differentials = true;
+
+    //     return { ray, wav_weight };
+    // }
 
     std::pair<DirectionSample3f, Spectrum>
     sample_direction(const Interaction3f &it, const Point2f &sample,
@@ -763,6 +853,7 @@ private:
     Vector3f m_dx, m_dy;
     // std::vector<std::unique_ptr<LensInterface<Float, Spectrum>>> m_interfaces;
     std::vector<LensInterface<Float, Spectrum>*> m_interfaces;
+    float m_lens_aperture_z, m_lens_aperture_radius;
 };
 
 MI_IMPLEMENT_CLASS_VARIANT(RealisticLensCamera, ProjectiveCamera)

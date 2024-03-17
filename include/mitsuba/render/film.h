@@ -187,6 +187,16 @@ public:
      */
     void set_size(const ScalarPoint2u &size);
 
+    /**
+     * \brief Get the physical size of the film in meters.
+    */
+    ScalarPoint2f get_physical_size() const {
+        float aspect = float(m_size.y()) / float(m_size.x());
+        float x = std::sqrt(m_diagonal * m_diagonal / (1.f + aspect * aspect));
+        float y = aspect * x;
+        return ScalarPoint2f(x / 2, y / 2);
+    }
+
     /// Return the image reconstruction filter (const version)
     const ReconstructionFilter *rfilter() const {
         return m_filter.get();
@@ -224,6 +234,7 @@ protected:
     bool m_sample_border;
     ref<ReconstructionFilter> m_filter;
     ref<Texture> m_srf;
+    float m_diagonal;   // physical size of film diagonal, in meters
 };
 
 MI_EXTERN_CLASS(Film)
