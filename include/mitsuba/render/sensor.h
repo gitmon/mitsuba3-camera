@@ -254,12 +254,14 @@ perspective_projection(const Vector<int, 2> &film_size,
      *     for a cropping window (if there is any)
      */
     return Transform4f::scale(
-               Vector3f(1.f / rel_size.x(), 1.f / rel_size.y(), 1.f)) *
-           Transform4f::translate(
-               Vector3f(-rel_offset.x(), -rel_offset.y(), 0.f)) *
-           Transform4f::scale(Vector3f(-0.5f, -0.5f * aspect, 1.f)) *
-           Transform4f::translate(Vector3f(-1.f, -1.f / aspect, 0.f)) *
-           Transform4f::perspective(fov_x, near_clip, far_clip);
+               Vector3f(1.f / rel_size.x(), 1.f / rel_size.y(), 1.f)) *     // --------v
+           Transform4f::translate(                                          //-----NDC2crop
+               Vector3f(-rel_offset.x(), -rel_offset.y(), 0.f)) *           //---------^
+
+           Transform4f::scale(Vector3f(-0.5f, -0.5f * aspect, 1.f)) *       // ---- clip2NDC
+           Transform4f::translate(Vector3f(-1.f, -1.f / aspect, 0.f)) *     // --------^
+
+           Transform4f::perspective(fov_x, near_clip, far_clip);            // camera2clip (perspective projection)
 }
 
 /// Helper function to create a orthographic projection transformation matrix
@@ -299,6 +301,48 @@ orthographic_projection(const Vector<int, 2> &film_size,
            Transform4f::translate(Vector3f(-1.f, -1.f / aspect, 0.f)) *
            Transform4f::orthographic(near_clip, far_clip);
 }
+
+// Helper function to convert between physical film dimensions to crop coordinates
+// used for RealisticCamera
+template <typename Float> Transform<Point<Float, 4>>
+film_to_crop_transform(const Vector<Float, 2> &phys_film_size,
+                       const Vector<int, 2> &film_size,
+                       const Vector<int, 2> &crop_size,
+                       const Vector<int, 2> &crop_offset) {
+
+    using Vector2f = Vector<Float, 2>;
+    using Vector3f = Vector<Float, 3>;
+    using Transform4f = Transform<Point<Float, 4>>;
+
+    Vector2f phys_size_f = Vector2f(phys_film_size),
+             film_size_f = Vector2f(film_size),
+             rel_size    = Vector2f(crop_size) / film_size_f,
+             rel_offset  = Vector2f(crop_offset) / film_size_f;
+
+    Float aspect = film_size_f.x() / film_size_f.y();
+
+    /**
+     * These do the following (in reverse order):
+     *
+     * 0. We start in camera space with points corresponding to physical
+     *    locations on the film's surface. The coordinates (which carry 
+     *    physical length units, m) cover the range of [-xmax, xmax] x 
+     *    [-ymax, ymax].
+     * 
+     * 1+2. Create transform from physical film units to [0,1]x[0,1] 
+     *    normalized device coordinates. 
+     *
+     * 3+4. Translate and scale the coordinates once more to account
+     *     for a cropping window (if there is any)
+     */
+    return Transform4f::scale(
+               Vector3f(1.f / rel_size.x(), 1.f / rel_size.y(), 1.f)) *     // --------v
+           Transform4f::translate(                                          //-----NDC2crop
+               Vector3f(-rel_offset.x(), -rel_offset.y(), 0.f)) *           //---------^
+           Transform4f::scale(Vector3f(0.5f / phys_size_f.x(), 0.5f / phys_size_f.y(), 1.f)) *
+           Transform4f::translate(Vector3f(phys_size_f.x(), phys_size_f.y(), 0.f));       // phys2NDC
+}
+
 
 //! @}
 // ========================================================================

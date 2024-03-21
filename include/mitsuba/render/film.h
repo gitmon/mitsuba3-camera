@@ -190,11 +190,11 @@ public:
     /**
      * \brief Get the physical size of the film in meters.
     */
-    ScalarPoint2f get_physical_size() const {
+    ScalarVector2f get_physical_size() const {
         float aspect = float(m_size.y()) / float(m_size.x());
         float x = std::sqrt(m_diagonal * m_diagonal / (1.f + aspect * aspect));
         float y = aspect * x;
-        return ScalarPoint2f(x / 2, y / 2);
+        return ScalarVector2f(x / 2, y / 2);
     }
 
     /// Return the image reconstruction filter (const version)

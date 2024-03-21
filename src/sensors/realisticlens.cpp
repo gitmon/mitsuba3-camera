@@ -151,9 +151,19 @@ class DispersiveMaterial {
 
         DispersiveMaterial(std::vector<std::pair<float, float>> sellmeier_terms) : m_sellmeier_terms(sellmeier_terms), m_use_cauchy(false) {}
 
-        // // TODO
         // Float compute_ior(Ray3f ray) const {
-        //     return compute_ior(ray.wavelength);
+            // if (!is_spectral_v<Spectrum>) {
+            //     // if not rendering in spectral mode, return the "nominal" IOR 
+            //     // (computed for a standard wavelength, 589.3nm)
+            //     return compute_ior();
+            // } else {
+            //     // in spectral mode, each ray carries a *vector* of wavelengths
+            //     // because of hero wavelength sampling. it doesn't make sense to
+            //     // compute multiple IORs (and thus find multiple paths) per ray,
+            //     // so let's just take the first wavelength (I guess???)
+            //     // TODO
+            //     return compute_ior(0.001 * ray.wavelengths[0]);
+            // }
         // }
 
         Float compute_ior(Float wavelength) const {
@@ -235,7 +245,7 @@ class LensInterface {
 
         virtual ~LensInterface() = default;
 
-        virtual Interaction3f intersect(const Ray3f &ray, Mask active = true) const = 0;
+        virtual Interaction3f intersect(const Ray3f &ray) const = 0;
 
         virtual Normal3f normal(const Point3f &p) const = 0;
 
@@ -247,17 +257,12 @@ class LensInterface {
             return m_z_intercept;
         }
 
-        Ray3f compute_interaction(const Ray3f &ray, Mask &active) {
-            // std::cout << "hi\n";
-            // std::cout << active << std::endl;
-            Interaction3f si = intersect(ray, active);
-            // std::cout << active << std::endl;
-            // std::cout << si << std::endl;
-            // std::cout << "hi2\n";
+        std::tuple<Ray3f, Mask> compute_interaction(const Ray3f &ray) {
+            Interaction3f si = intersect(ray);
             
             // if no intersection, early termination
             // if (!intersected) { return false; }
-            active &= si.is_valid();
+            Mask active = si.is_valid();
 
             // reject intersection if it lies outside the lens' radius
             // if (dr::sqr(si.p.x()) + dr::sqr(si.p.y()) >= dr::sqr(m_aperture_radius)) { return false; }
@@ -265,19 +270,15 @@ class LensInterface {
 
             // TODO: compute IOR using the ray's wavelength
             // int_ior = m_int_material->compute_ior(ray);
-            // std::cout << "hi3\n";
             Float int_ior = m_int_material.compute_ior();
             Float ext_ior = m_ext_material.compute_ior();
-            // std::cout << "hi4\n";
 
             // could replace with `Frame3f::cos_theta(si.wi)` if `si` were a SurfaceInteraction (equipped with local/shading frame)
             Float cos_theta_i = dr::dot(-ray.d, si.n);
             Float eta = int_ior / ext_ior;
 
             // fresnel() handles the int_ior/ext_ior swap 
-            // std::cout << "hi5\n";
             auto [r, cos_theta_t, eta_it, eta_ti] = fresnel(cos_theta_i, eta);
-            // std::cout << "hi6\n";
 
             // std::cout << "c_i: " << cos_theta_i << ", c_o: " << cos_theta_t << ", eta: " << eta_ti << "\n";
             // std::cout << ", eta: " << eta_ti << ", ";
@@ -288,14 +289,11 @@ class LensInterface {
             active &= (r <= dr::OneMinusEpsilon<Float>);
 
             // get refraction direction in *global frame* (not `si`'s shading frame)
-            // std::cout << "hi7\n";
             Vector3f d_out = refract(-ray.d, si.n, cos_theta_t, eta_ti);
-            // std::cout << "hi8\n";
             Ray3f next_ray = dr::zeros<Ray3f>();
             dr::masked(next_ray, active) = si.spawn_ray(d_out);
-            // std::cout << "hi10\n";
 
-            return next_ray;
+            return { next_ray, active };
         }
 
         virtual std::string to_string() const {
@@ -330,50 +328,38 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
 
         // TODO: should bools be Masks?
         // TODO: use math::solve_quadratic for quadratic solve
-        Interaction3f intersect(const Ray3f &ray, Mask active = true) const override {
-            // std::cout << "a1\n";
+        Interaction3f intersect(const Ray3f &ray) const override {
             Interaction3f si = dr::zeros<Interaction3f>();
-            // std::cout << "a2\n";
             si.time = ray.time;
             si.wavelengths = ray.wavelengths;
-            // std::cout << "a3\n";
 
             // compute sphere position in the ray's "frame"
-            // std::cout << si.time << ", " << si.wavelengths << "a4\n\n";
             Point3f p_center_local = (Point3f) (m_center - ray.o);
             Float center_proj = dr::dot(p_center_local, ray.d);
             Float perp_projection = dr::norm(p_center_local - center_proj * ray.d);
             Float discriminant = dr::sqr(m_curvature_radius) - dr::sqr(perp_projection);
-            // std::cout << p_center_local << "\n";
-            // std::cout << center_proj << "\n";
-            // std::cout << discriminant << " a5\n\n";
 
             // // TODO: handling `if` clauses
             // // if discriminant is negative, no intersection
-            // if (discriminant < 0.f) { return false; }
-            // std::cout << "a6\n";
-            active &= discriminant >= Float(0.0);
+            Mask active = discriminant >= Float(0.0);
             if (dr::none_or<false>(active)) {       // TODO: this is how early exit is handled in `interaction.h`
                 // std::cout << "D < 0, no intersection\n";
                 return si;
             }
-            // std::cout << "a7\n";
 
             Float sqrt_disc = dr::sqrt(discriminant);
             Float near_t = center_proj - sqrt_disc;
             Float far_t = center_proj + sqrt_disc;
-            // std::cout << "a8\n";
-
-            // // if sphere is behind the ray
-            // if (far_t < 0.f) { return false; }
-            // // otherwise, choose nearer of 2 intersections
-            // t_intersect = (near_t > 0.f) ? near_t : far_t;
 
             // from `sphere.cpp`
             // Sphere doesn't intersect with the segment on the ray
-            Mask out_bounds = far_t < Float(0.0);
-            active &= !out_bounds;
-            // std::cout << "a9\n";
+            // Mask out_bounds = far_t < Float(0.0);
+            // if (dr::none_or<false>(active)) {       // TODO: this is how early exit is handled in `interaction.h`
+            //     // std::cout << "sphere behind ray, no intersection\n";
+            //     return si;
+            // }
+
+            active = far_t >= Float(0.0);
             if (dr::none_or<false>(active)) {       // TODO: this is how early exit is handled in `interaction.h`
                 // std::cout << "sphere behind ray, no intersection\n";
                 return si;
@@ -385,23 +371,22 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
                 // convex case
                 // we are only testing intersection with the convex/near half of the sphere.
                 // if `near_t` is positive, the intersection is valid; otherwise, no intersection
-                active &= near_t >= Float(0.0);
-                t_intersect = dr::select(active, near_t, dr::Infinity<Float>);
+                // active &= near_t >= Float(0.0);
+                // t_intersect = dr::select(active, near_t, dr::Infinity<Float>);
+                t_intersect = dr::select(near_t >= Float(0.f), near_t, dr::Infinity<Float>);
             } 
             else {
                 // concave case
-                // take `far_t`. from the earlier bounds check, we know that `far_t` 
+                // always take `far_t`. from the earlier bounds check, we know that `far_t` 
                 // is already positive, so it's a valid intersection
-                t_intersect = dr::select(active, Float(far_t), dr::Infinity<Float>);
+                // t_intersect = dr::select(active, far_t, dr::Infinity<Float>);
+                t_intersect = far_t;
             }
 
             Point3f p_surface = ray(t_intersect);
-            // std::cout << "a11\n";
-
             si.t = t_intersect;
             si.p = p_surface;
             si.n = normal(p_surface);
-            // std::cout << "a12\n";
 
             return si;
         }
@@ -470,6 +455,10 @@ public:
         // std::cout << mat2.to_string() << std::endl;
 
         build_lens();
+        // float object_distance = 0.5f;
+        // float focal_length = 0.03f;
+        // float lens_diameter = 0.01f;
+        // build_thin_lens(object_distance, focal_length, lens_diameter / 2);
 
         // float r = 6.f;
         // float xmin, ymin, xmax, ymax;
@@ -503,15 +492,47 @@ public:
         // std::cout << std::endl;
     }
 
+    void build_thin_lens(float object_distance, float curvature_radius, float lens_radius) {
+        // place the film plane at the image formation distance `xi` away from the lens
+        // equivalently, keep the film plane at z=0 and move the lens to `z_intercept` = `xi`
+        float z_intercept = object_distance / (1.f + object_distance / curvature_radius);
+        float thickness = 2.f * curvature_radius * (1.f - std::sqrt(1.f - (lens_radius / curvature_radius) * (lens_radius / curvature_radius)));
+
+        DispersiveMaterial<Float> air_material = DispersiveMaterial<Float>(1.0f, 0.0f);
+        DispersiveMaterial<Float> glass_material = DispersiveMaterial<Float>(1.5f, 0.0f);
+        auto lens1 = new SphericalLensInterface<Float, Spectrum>(curvature_radius, lens_radius, z_intercept, glass_material, air_material);
+        m_interfaces.push_back(lens1);
+        auto lens2 = new SphericalLensInterface<Float, Spectrum>(-curvature_radius, lens_radius, z_intercept + thickness, air_material, glass_material);
+        m_interfaces.push_back(lens2);
+
+        m_lens_aperture_z = z_intercept;
+        m_lens_aperture_radius = lens_radius;
+
+        float magnification = z_intercept / object_distance;
+        float film_halfsize = std::max(m_film->get_physical_size().x(), m_film->get_physical_size().y());
+        float approx_fov = dr::rad_to_deg(2.f * dr::atan((film_halfsize + lens_radius) / z_intercept));
+        std::cout << "Lens thickness: " << thickness * 1000.f << " mm, \n";
+        std::cout << "Thickness ratio: " << thickness / curvature_radius << ", \n";
+        std::cout << "Lens position: " << z_intercept << " m, \n";
+        std::cout << "Approx FOV: " << approx_fov << " deg., \n";
+        std::cout << "Magnification: " << magnification << "\n";
+    }
+
     void build_lens() {
         // float aperture_radius = 5.f;
         // float curvature_radius = 10.f;
         // float z_intercept = 0.1f;
+
         float aperture_radius = 0.001f;
         float curvature_radius = 1.f;
         float z_intercept = 0.02f;
-
         float thickness = 0.005f;
+
+        // float aperture_radius = 0.03f;
+        // float curvature_radius = 0.03f;
+        // float z_intercept = 0.02f;
+        // float thickness = 0.05f;
+        m_lens_aperture_radius = 0.001f;
 
         // TODO: change to `new MyClass()` ? 
         DispersiveMaterial<Float> air_material = DispersiveMaterial<Float>(1.0f, 0.0f);
@@ -522,33 +543,57 @@ public:
         // auto lens = std::make_unique<SphericalLensInterface<Float, Spectrum>>(curvature_radius, aperture_radius, z_intercept, air_material, glass_material);
         // m_interfaces.push_back(std::move(lens));
 
-        // auto lens1 = new SphericalLensInterface<Float, Spectrum>(curvature_radius, aperture_radius, z_intercept, glass_material, air_material);
-        // m_interfaces.push_back(lens1);
+        auto lens1 = new SphericalLensInterface<Float, Spectrum>(curvature_radius, aperture_radius, z_intercept, glass_material, air_material);
+        m_interfaces.push_back(lens1);
+        
         // auto lens2 = new SphericalLensInterface<Float, Spectrum>(-curvature_radius, aperture_radius, z_intercept + 2 * curvature_radius, air_material, glass_material);
         // m_interfaces.push_back(lens2);
         auto lens2 = new SphericalLensInterface<Float, Spectrum>(-curvature_radius, aperture_radius, z_intercept + thickness, air_material, glass_material);
         m_interfaces.push_back(lens2);
 
+        // auto lens2 = new SphericalLensInterface<Float, Spectrum>(curvature_radius, aperture_radius, z_intercept + thickness, air_material, glass_material);
+        // m_interfaces.push_back(lens2);
+
         for (const auto &interface : m_interfaces) {
             std::cout << interface->to_string() << std::endl;
         }
 
+        // TODO: re-enable
         m_lens_aperture_z = m_interfaces[0]->get_z();
-        m_lens_aperture_radius = m_interfaces[0]->get_radius();
+        // m_lens_aperture_radius = m_interfaces[0]->get_radius();
     }
 
     std::tuple<Ray3f, Mask> trace_ray_through_lens(const Ray3f &ray) const {
         Mask active = true;
-        Ray3f ray_(ray);
+        Ray3f curr_ray(ray);
+        // UInt32 lens_id = 0;
+        // // auto itr = m_interfaces.begin();
+
+        // dr::Loop<Mask> loop("trace", active, lens_id, ray_);
+        // while(loop(active)) {
+        //     auto [tmp_ray, tmp_active] = m_interfaces[lens_id]->compute_interaction(ray_);
+        //     ray_ = tmp_ray;
+        //     lens_id += 1;
+        //     active &= tmp_active && (lens_id < m_interfaces.size());
+        // }
+
+
         // std::cout << active << ", ";
         for (const auto &interface : m_interfaces) {
-
             // TODO: is it better to mask?
             // TODO: actually, replace this with a dr::loop! then while-loop through
             // all the lens elements and add `&& active` to the conditional. rays that
             // fail will terminate early and have active == false
                         // ray_ = interface->compute_interaction(ray_, active);
-            dr::masked(ray_, active) = interface->compute_interaction(ray_, active);
+            auto [next_ray, active_] = interface->compute_interaction(curr_ray);
+
+            active &= active_;
+
+            if (dr::none_or<false>(active)) {
+                break;
+            }
+
+            curr_ray = next_ray;
             // std::cout   << ", " << ray_.o.x() 
             //             << ", " << ray_.o.y() 
             //             << ", " << ray_.o.z() 
@@ -559,8 +604,52 @@ public:
         // std::cout << active << std::endl;
         // std::cout << ray_.o << ", " << ray_.d << std::endl;
         
-        return { ray_, active };
+        return { curr_ray, active };
     }
+
+
+    void draw_ray_through_lens(const Ray3f &ray, const Point3f p_film) const {
+        Mask active = true;
+        Ray3f curr_ray(ray);
+
+        Vector3f d_film = dr::normalize(curr_ray.o - p_film);
+
+        std::cout   << p_film.x() 
+            << ", " << p_film.y() 
+            << ", " << p_film.z() 
+            << ", " << d_film.x()
+            << ", " << d_film.y()
+            << ", " << d_film.z()
+            << ", " << active;
+        std::cout   << ",\t";
+
+        for (const auto &interface : m_interfaces) {
+            std::cout   << curr_ray.o.x() 
+                << ", " << curr_ray.o.y() 
+                << ", " << curr_ray.o.z() 
+                << ", " << curr_ray.d.x()
+                << ", " << curr_ray.d.y()
+                << ", " << curr_ray.d.z()
+                << ", " << active;
+            std::cout   << ",\t";
+
+            auto [next_ray, active_] = interface->compute_interaction(curr_ray);
+            active &= active_;
+            if (dr::none_or<false>(active)) { break; }
+            curr_ray = next_ray;
+        }
+        std::cout   << curr_ray.o.x() 
+            << ", " << curr_ray.o.y() 
+            << ", " << curr_ray.o.z() 
+            << ", " << curr_ray.d.x()
+            << ", " << curr_ray.d.y()
+            << ", " << curr_ray.d.z()
+            << ", " << active;
+        
+        std::cout   << std::endl;
+    }
+
+
 
     void traverse(TraversalCallback *callback) override {
         Base::traverse(callback);
@@ -581,6 +670,14 @@ public:
     }
 
     void update_camera_transforms() {
+        m_film_to_sample = film_to_crop_transform(
+            m_film->get_physical_size(), m_film->size(), 
+            m_film->crop_size(), m_film->crop_offset()); 
+
+        m_sample_to_film = m_film_to_sample.inverse();
+
+        // TODO: deprecate the following
+
         m_camera_to_sample = perspective_projection(
             m_film->size(), m_film->crop_size(), m_film->crop_offset(),
             m_x_fov, Float(m_near_clip), Float(m_far_clip));
@@ -607,9 +704,6 @@ public:
                         m_x_fov, m_image_rect, m_normalization);
     }
 
-    // TODO
-    // NOTE: to set a ray as "ignored", simply set the importance weight to zero
-    // (to be explicit, can use `dr::zeros<Spectrum>()`)
     std::pair<Ray3f, Spectrum> sample_ray(Float time, Float wavelength_sample,
                                           const Point2f &position_sample,
                                           const Point2f &aperture_sample,
@@ -639,9 +733,16 @@ public:
         // the physical location of a point on the film, expressed in local camera space. 
         // The film occupies [-xmax, xmax] x [-ymax, ymax] x [0,0]. Meanwhile, 
         // `position_sample` is a uniform 2D sample distributed on [0,1]^2.
-        Point3f near_p = Point3f(-xmax + 2 * xmax * position_sample.x(), 
-                                 -ymax + 2 * ymax * position_sample.y(), 
-                                 0.f);
+
+        // TODO: account for crop window (useful for debugging!!!)
+
+        // Point3f near_p = Point3f(-xmax + 2 * xmax * position_sample.x(), 
+        //                          -ymax + 2 * ymax * position_sample.y(), 
+        //                          0.f);
+
+        Point3f near_p = m_sample_to_film *
+                        Point3f(position_sample.x(), position_sample.y(), 0.f);
+
         // Point3f near_p = Point3f(0.f);
 
         // std::cout << near_p_ << "\t, " << near_p << std::endl;
@@ -695,6 +796,9 @@ public:
         // TODO
         dr::masked(wav_weight, !active) = dr::zeros<Spectrum>();
 
+        draw_ray_through_lens(ray, near_p);
+        // std::cout << d_out << ",\t" << wav_weight << ",\t" << active << "\n";
+
 
         // Convert ray_out from camera to world space
         // dr::masked(ray_out, active) = m_to_world.value() * ray_out;
@@ -706,6 +810,7 @@ public:
         // STAGE 4: POST-PROCESS
         // handle z-clipping
         // NOTE: the direction `d` in inv_z should be in the camera frame, i.e. before `m_to_world` is applied
+        // TODO
         Float inv_z = dr::rcp(d_out.z());
         Float near_t = m_near_clip * inv_z,
               far_t  = m_far_clip * inv_z;
@@ -717,6 +822,7 @@ public:
 
         return { ray_out, wav_weight };
     }
+
 
     // // NOTE: can we remove this and fallback to the default `sample_ray_differential()` implementation
     // // in sensor.cpp?
@@ -844,6 +950,8 @@ public:
 
     MI_DECLARE_CLASS()
 private:
+    Transform4f m_film_to_sample;
+    Transform4f m_sample_to_film;
     Transform4f m_camera_to_sample;
     Transform4f m_sample_to_camera;
     BoundingBox2f m_image_rect;
