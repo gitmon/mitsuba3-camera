@@ -454,11 +454,11 @@ public:
         // std::cout << mat2.compute_ior(0.5893f) << std::endl;
         // std::cout << mat2.to_string() << std::endl;
 
-        build_lens();
-        // float object_distance = 0.5f;
-        // float focal_length = 0.03f;
-        // float lens_diameter = 0.01f;
-        // build_thin_lens(object_distance, focal_length, lens_diameter / 2);
+        // build_lens();
+        float object_distance = 0.5f;
+        float focal_length = 0.05f;
+        float lens_diameter = 0.03f;
+        build_thin_lens(object_distance, focal_length, lens_diameter / 2);
 
         // float r = 6.f;
         // float xmin, ymin, xmax, ymax;
@@ -567,14 +567,13 @@ public:
         Mask active = true;
         Ray3f curr_ray(ray);
         // UInt32 lens_id = 0;
-        // // auto itr = m_interfaces.begin();
 
-        // dr::Loop<Mask> loop("trace", active, lens_id, ray_);
+        // dr::Loop<Mask> loop("trace", active, lens_id, curr_ray);
         // while(loop(active)) {
-        //     auto [tmp_ray, tmp_active] = m_interfaces[lens_id]->compute_interaction(ray_);
-        //     ray_ = tmp_ray;
+        //     auto [next_ray, next_active] = m_interfaces[lens_id]->compute_interaction(curr_ray);
+        //     curr_ray = next_ray;
         //     lens_id += 1;
-        //     active &= tmp_active && (lens_id < m_interfaces.size());
+        //     active &= next_active && (lens_id < m_interfaces.size());
         // }
 
 
@@ -718,10 +717,6 @@ public:
         ray.time = time;
         ray.wavelengths = wavelengths;
 
-        Point2f film_size = m_film->get_physical_size();
-        Float xmax = film_size.x();
-        Float ymax = film_size.y();
-        
         // STAGE 1: FILM SAMPLING
 
         // Compute the sample position on the near plane (local camera space).
@@ -733,19 +728,8 @@ public:
         // the physical location of a point on the film, expressed in local camera space. 
         // The film occupies [-xmax, xmax] x [-ymax, ymax] x [0,0]. Meanwhile, 
         // `position_sample` is a uniform 2D sample distributed on [0,1]^2.
-
-        // TODO: account for crop window (useful for debugging!!!)
-
-        // Point3f near_p = Point3f(-xmax + 2 * xmax * position_sample.x(), 
-        //                          -ymax + 2 * ymax * position_sample.y(), 
-        //                          0.f);
-
         Point3f near_p = m_sample_to_film *
                         Point3f(position_sample.x(), position_sample.y(), 0.f);
-
-        // Point3f near_p = Point3f(0.f);
-
-        // std::cout << near_p_ << "\t, " << near_p << std::endl;
 
         // STAGE 2: APERTURE SAMPLING
 
@@ -796,7 +780,7 @@ public:
         // TODO
         dr::masked(wav_weight, !active) = dr::zeros<Spectrum>();
 
-        draw_ray_through_lens(ray, near_p);
+        // draw_ray_through_lens(ray, near_p);
         // std::cout << d_out << ",\t" << wav_weight << ",\t" << active << "\n";
 
 
