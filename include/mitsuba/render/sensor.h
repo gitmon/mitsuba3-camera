@@ -319,8 +319,6 @@ film_to_crop_transform(const Vector<Float, 2> &phys_film_size,
              rel_size    = Vector2f(crop_size) / film_size_f,
              rel_offset  = Vector2f(crop_offset) / film_size_f;
 
-    Float aspect = film_size_f.x() / film_size_f.y();
-
     /**
      * These do the following (in reverse order):
      *

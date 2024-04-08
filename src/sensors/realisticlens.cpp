@@ -142,36 +142,32 @@ The exact camera position and orientation is most easily expressed using the
 
  */
 
-// TODO: is the template needed? 
-// TODO: need to handle multiple wavelengths? since `Ray3f` can contain multiple?
-template <typename Float>
+template <typename Float, typename Spectrum>
 class DispersiveMaterial {
     public:
+        MI_IMPORT_TYPES()
         DispersiveMaterial(float cauchy_A, float cauchy_B) : m_cauchy_A(cauchy_A), m_cauchy_B(cauchy_B), m_use_cauchy(true) {}
 
         DispersiveMaterial(std::vector<std::pair<float, float>> sellmeier_terms) : m_sellmeier_terms(sellmeier_terms), m_use_cauchy(false) {}
 
-        // Float compute_ior(Ray3f ray) const {
-            // if (!is_spectral_v<Spectrum>) {
-            //     // if not rendering in spectral mode, return the "nominal" IOR 
-            //     // (computed for a standard wavelength, 589.3nm)
-            //     return compute_ior();
-            // } else {
-            //     // in spectral mode, each ray carries a *vector* of wavelengths
-            //     // because of hero wavelength sampling. it doesn't make sense to
-            //     // compute multiple IORs (and thus find multiple paths) per ray,
-            //     // so let's just take the first wavelength (I guess???)
-            //     // TODO
-            //     return compute_ior(0.001 * ray.wavelengths[0]);
-            // }
-        // }
+        Float compute_ior(const Ray3f& ray) const {
+            if constexpr (!is_spectral_v<Spectrum>) {
+                // if not rendering in spectral mode, return the "nominal" IOR 
+                // (computed for a standard wavelength, 589.3nm)
+                return compute_ior(Float(0.5893f));
+            } else {
+                // in spectral mode, each ray carries a *vector* of wavelengths.
+                // for dispersion calculations, we take just the first wavelength.
+                return compute_ior(0.001f * ray.wavelengths[0]);
+            }
+        }
 
         Float compute_ior(Float wavelength) const {
             return dr::select(m_use_cauchy, compute_ior_cauchy(wavelength), compute_ior_sellmeier(wavelength));
         }
 
-        Float compute_ior() const {
-            return compute_ior(Float(0.5893f));
+        Float compute_abbe_number() const {
+            return (compute_ior(Float(0.58756f)) - 1.0f) / (compute_ior(Float(0.4861f)) - compute_ior(Float(0.6563f)));
         }
 
         std::string to_string() const {
@@ -203,6 +199,9 @@ class DispersiveMaterial {
 
     private:
         const char* name;
+        // TODO: convert to mitsuba types
+        // Vector2f m_cauchy;
+        // Vector3f m_sellmeier_B, m_sellmeier_C;
         float m_cauchy_A = 0.f;
         float m_cauchy_B = 0.f;
         std::vector<std::pair<float, float>> m_sellmeier_terms;
@@ -235,12 +234,11 @@ class DispersiveMaterial {
 //     //     })},
 // // };
 
-// TODO: are the templates needed? the IMPORT_TYPES() fails without it
 template <typename Float, typename Spectrum>
 class LensInterface {
     public:
-    MI_IMPORT_TYPES()
-        LensInterface(float aperture_radius, float z_intercept, DispersiveMaterial<Float> int_material, DispersiveMaterial<Float> ext_material) : 
+        MI_IMPORT_TYPES()
+        LensInterface(float aperture_radius, float z_intercept, DispersiveMaterial<Float, Spectrum> int_material, DispersiveMaterial<Float, Spectrum> ext_material) : 
         m_z_intercept(z_intercept), m_aperture_radius(aperture_radius), m_int_material(int_material), m_ext_material(ext_material) {}
 
         virtual ~LensInterface() = default;
@@ -257,7 +255,11 @@ class LensInterface {
             return m_z_intercept;
         }
 
-        std::tuple<Ray3f, Mask> compute_interaction(const Ray3f &ray) {
+        virtual void offset_along_axis(float delta) {
+            m_z_intercept += delta;
+        }
+
+        std::tuple<Ray3f, Mask> compute_interaction(const Ray3f &ray) const {
             Interaction3f si = intersect(ray);
             
             // if no intersection, early termination
@@ -266,12 +268,11 @@ class LensInterface {
 
             // reject intersection if it lies outside the lens' radius
             // if (dr::sqr(si.p.x()) + dr::sqr(si.p.y()) >= dr::sqr(m_aperture_radius)) { return false; }
-            active &= (dr::sqr(si.p.x()) + dr::sqr(si.p.y()) < dr::sqr(m_aperture_radius));
+            active &= (dr::sqr(si.p.x()) + dr::sqr(si.p.y())) < dr::sqr(m_aperture_radius);
 
-            // TODO: compute IOR using the ray's wavelength
-            // int_ior = m_int_material->compute_ior(ray);
-            Float int_ior = m_int_material.compute_ior();
-            Float ext_ior = m_ext_material.compute_ior();
+            // TODO: validate
+            Float int_ior = m_int_material.compute_ior(ray);
+            Float ext_ior = m_ext_material.compute_ior(ray);
 
             // could replace with `Frame3f::cos_theta(si.wi)` if `si` were a SurfaceInteraction (equipped with local/shading frame)
             Float cos_theta_i = dr::dot(-ray.d, si.n);
@@ -310,7 +311,7 @@ class LensInterface {
         float m_z_intercept;
     private:
         float m_aperture_radius;
-        DispersiveMaterial<Float> m_int_material, m_ext_material;
+        DispersiveMaterial<Float, Spectrum> m_int_material, m_ext_material;
 };
 
 template <typename Float, typename Spectrum>
@@ -318,7 +319,7 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
     public:
         MI_IMPORT_TYPES()
         SphericalLensInterface(float curvature_radius, float aperture_radius, float z_intercept, 
-        DispersiveMaterial<Float> int_material, DispersiveMaterial<Float> ext_material) : 
+        DispersiveMaterial<Float, Spectrum> int_material, DispersiveMaterial<Float, Spectrum> ext_material) : 
         LensInterface<Float, Spectrum>(aperture_radius, z_intercept, int_material, ext_material), m_curvature_radius(curvature_radius) {
             m_center = Point3f(0.0, 0.0, LensInterface<Float, Spectrum>::m_z_intercept + m_curvature_radius);
 
@@ -326,7 +327,6 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
             m_is_convex = m_curvature_radius > 0.f;
         }
 
-        // TODO: should bools be Masks?
         // TODO: use math::solve_quadratic for quadratic solve
         Interaction3f intersect(const Ray3f &ray) const override {
             Interaction3f si = dr::zeros<Interaction3f>();
@@ -367,21 +367,25 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
 
             // ray.o is either inside the sphere, or in front of it.
             Float t_intersect;
-            if (m_is_convex) {
-                // convex case
-                // we are only testing intersection with the convex/near half of the sphere.
-                // if `near_t` is positive, the intersection is valid; otherwise, no intersection
-                // active &= near_t >= Float(0.0);
-                // t_intersect = dr::select(active, near_t, dr::Infinity<Float>);
-                t_intersect = dr::select(near_t >= Float(0.f), near_t, dr::Infinity<Float>);
-            } 
-            else {
-                // concave case
-                // always take `far_t`. from the earlier bounds check, we know that `far_t` 
-                // is already positive, so it's a valid intersection
-                // t_intersect = dr::select(active, far_t, dr::Infinity<Float>);
-                t_intersect = far_t;
-            }
+            // if (m_is_convex ^ (ray.d.z() > 0.f)) {
+            //     // convex case
+            //     // we are only testing intersection with the convex/near half of the sphere.
+            //     // if `near_t` is positive, the intersection is valid; otherwise, no intersection
+            //     // active &= near_t >= Float(0.0);
+            //     // t_intersect = dr::select(active, near_t, dr::Infinity<Float>);
+            //     t_intersect = dr::select(near_t >= Float(0.f), near_t, dr::Infinity<Float>);
+            // } 
+            // else {
+            //     // concave case
+            //     // always take `far_t`. from the earlier bounds check, we know that `far_t` 
+            //     // is already positive, so it's a valid intersection
+            //     // t_intersect = dr::select(active, far_t, dr::Infinity<Float>);
+            //     t_intersect = far_t;
+            // }
+
+            t_intersect = dr::select(m_is_convex ^ (ray.d.z() < 0.f),
+                dr::select(near_t >= Float(0.f), near_t, dr::Infinity<Float>),
+                far_t);
 
             Point3f p_surface = ray(t_intersect);
             si.t = t_intersect;
@@ -394,6 +398,11 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
         Normal3f normal(const Point3f &p) const override {
             Normal3f normal = (Normal3f) dr::normalize(p - m_center);
             return dr::select(m_is_convex, normal, -normal);
+        }
+
+        void offset_along_axis(float delta) override {
+            LensInterface<Float, Spectrum>::m_z_intercept += delta;
+            m_center = Point3f(m_center.x(), m_center.y(), m_center.z() + delta);
         }
 
         std::string to_string() const override {
@@ -410,8 +419,83 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
     private:
         float m_curvature_radius;
         Point3f m_center;
-        bool m_is_convex;
+        Mask m_is_convex;
 };
+
+
+template <typename Float, typename Spectrum>
+class PlaneLensInterface final : public LensInterface<Float, Spectrum> {
+    public:
+        MI_IMPORT_TYPES()
+        PlaneLensInterface(Normal3f normal, float aperture_radius, float z_intercept, 
+        DispersiveMaterial<Float, Spectrum> int_material, DispersiveMaterial<Float, Spectrum> ext_material) : 
+        LensInterface<Float, Spectrum>(aperture_radius, z_intercept, int_material, ext_material), m_normal(normal) {
+            m_param = m_normal.z() * LensInterface<Float, Spectrum>::m_z_intercept;
+        }
+
+        PlaneLensInterface(float aperture_radius, float z_intercept, 
+        DispersiveMaterial<Float, Spectrum> int_material, DispersiveMaterial<Float, Spectrum> ext_material) : 
+        LensInterface<Float, Spectrum>(aperture_radius, z_intercept, int_material, ext_material) {
+            m_normal = Normal3f(0.f, 0.f, -1.0f);
+            m_param = m_normal.z() * LensInterface<Float, Spectrum>::m_z_intercept;
+        }
+
+        Interaction3f intersect(const Ray3f &ray) const override {
+            Interaction3f si = dr::zeros<Interaction3f>();
+            si.time = ray.time;
+            si.wavelengths = ray.wavelengths;
+
+            // no-intersection case: ray.d is perpendicular to m_normal
+            Float n_dot_d = dr::dot(m_normal, ray.d);
+            Mask active = dr::abs(n_dot_d) >= dr::Epsilon<Float>;
+            if (dr::none_or<false>(active)) {
+                return si;
+            }
+
+            Float t = (m_param - dr::dot(m_normal, ray.o)) / n_dot_d;
+            active = t >= Float(0.0);
+            if (dr::none_or<false>(active)) {
+                return si;
+            }
+
+            Point3f p_surface = ray(t);
+            si.t = t;
+            si.p = p_surface;
+            si.n = normal(p_surface);
+
+            return si;
+        }
+
+        Normal3f normal(const Point3f &p) const override {
+            // TODO: direction depends on whether ray is entering/leaving medium?
+            // CONVENTION: interior is -z, exterior is +z
+            return m_normal;
+        }
+
+        void offset_along_axis(float delta) override {
+            LensInterface<Float, Spectrum>::m_z_intercept += delta;
+            m_param = m_normal.z() * LensInterface<Float, Spectrum>::m_z_intercept;
+        }
+
+        std::string to_string() const override {
+            using string::indent;
+            std::ostringstream oss;
+
+            oss << "PlanarLensInterface[" << std::endl
+                << "  z_intercept = " << LensInterface<Float, Spectrum>::m_z_intercept << "," << std::endl
+                << "  normal = " << m_normal << "," << std::endl
+                << "]";
+            return oss.str();
+        }
+    private:
+        Normal3f m_normal;
+        Float m_param;
+};
+
+
+
+
+
 
 
 template <typename Float, typename Spectrum>
@@ -455,10 +539,26 @@ public:
         // std::cout << mat2.to_string() << std::endl;
 
         // build_lens();
-        float object_distance = 0.5f;
+        // float object_distance = 0.5f;
+        // float focal_length = 0.05f;
+        // float lens_diameter = 0.005f;
+        // build_thin_lens(object_distance, focal_length, lens_diameter / 2);        
+
+        // float object_distance = 6.0f;
+        // float focal_length = 0.05f;
+        // float lens_diameter = 0.01f;
+        // build_thin_lens(object_distance, focal_length, lens_diameter / 2);
+
+        float object_distance = 6.0f;
         float focal_length = 0.05f;
-        float lens_diameter = 0.03f;
-        build_thin_lens(object_distance, focal_length, lens_diameter / 2);
+        float lens_diameter = 0.01f;
+        build_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
+
+        Float bp(0.0), bfl(0.0), fp(0.0), ffl(0.0);
+        compute_thick_lens_approximation(bp, bfl, fp, ffl);
+
+        std::cout << "Principal planes: z = " << bp << ", " << fp << "\n";
+        std::cout << "Focal lengths: back = " << bfl << ", front = " << ffl << "\n";
 
         // float r = 6.f;
         // float xmin, ymin, xmax, ymax;
@@ -479,7 +579,7 @@ public:
         //             << ", " << ray.d.x()
         //             << ", " << ray.d.y()
         //             << ", " << ray.d.z();
-        //         auto [ray_out, active] = trace_ray_through_lens(ray);
+        //         auto [ray_out, active] = trace_ray_from_film(ray);
         //         std::cout   << "\n";
         //         // std::cout   << ray_out.o.x() << ", " 
         //         //             << ray_out.o.y() << ", " 
@@ -495,11 +595,17 @@ public:
     void build_thin_lens(float object_distance, float curvature_radius, float lens_radius) {
         // place the film plane at the image formation distance `xi` away from the lens
         // equivalently, keep the film plane at z=0 and move the lens to `z_intercept` = `xi`
-        float z_intercept = object_distance / (1.f + object_distance / curvature_radius);
+
+        // clamp to ensure a real image is formed
+        float distance = std::max(object_distance, 4.001f * curvature_radius);
+
+        // set the lens position using the *thin lens* equation; use this to validate
+        // that `focus_thick_lens()` is behaving correctly. 
+        float z_intercept = 0.5f * distance * (1.f - dr::sqrt(1.f - 4.f * curvature_radius / distance));
         float thickness = 2.f * curvature_radius * (1.f - std::sqrt(1.f - (lens_radius / curvature_radius) * (lens_radius / curvature_radius)));
 
-        DispersiveMaterial<Float> air_material = DispersiveMaterial<Float>(1.0f, 0.0f);
-        DispersiveMaterial<Float> glass_material = DispersiveMaterial<Float>(1.5f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> air_material = DispersiveMaterial<Float, Spectrum>(1.000277f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> glass_material = DispersiveMaterial<Float, Spectrum>(1.5046f, 0.00420f);
         auto lens1 = new SphericalLensInterface<Float, Spectrum>(curvature_radius, lens_radius, z_intercept, glass_material, air_material);
         m_interfaces.push_back(lens1);
         auto lens2 = new SphericalLensInterface<Float, Spectrum>(-curvature_radius, lens_radius, z_intercept + thickness, air_material, glass_material);
@@ -508,15 +614,67 @@ public:
         m_lens_aperture_z = z_intercept;
         m_lens_aperture_radius = lens_radius;
 
-        float magnification = z_intercept / object_distance;
-        float film_halfsize = std::max(m_film->get_physical_size().x(), m_film->get_physical_size().y());
-        float approx_fov = dr::rad_to_deg(2.f * dr::atan((film_halfsize + lens_radius) / z_intercept));
-        std::cout << "Lens thickness: " << thickness * 1000.f << " mm, \n";
-        std::cout << "Thickness ratio: " << thickness / curvature_radius << ", \n";
-        std::cout << "Lens position: " << z_intercept << " m, \n";
-        std::cout << "Approx FOV: " << approx_fov << " deg., \n";
-        std::cout << "Magnification: " << magnification << "\n";
+        // get a (conservative) estimate of the lens' total extent. This is used to launch
+        // rays from the outside world towards the lens body.
+        m_lens_terminal_z = m_interfaces.back()->get_z() + std::abs(curvature_radius);
+
+        Float delta = focus_thick_lens(Float(distance));
+        float tmp = -distance / (1.f - distance / curvature_radius);
+
+        std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
     }
+
+
+    void build_doublet_lens(float object_distance, float R, float lens_radius) {
+        // NOTE: our doublet focal length formula only applies if the two glasses have the same index!!!
+        float focal_length = 2.0f * R;
+        float distance = std::max(object_distance, 4.001f * focal_length);
+        float z_intercept = 0.5f * distance * (1.f - dr::sqrt(1.f - 4.f * focal_length / distance));
+        
+        // z_intercept += 0.0201023f;
+        float thickness = 2.f * R * (1.f - std::sqrt(1.f - (lens_radius / R) * (lens_radius / R)));
+
+        DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>(1.000277f, 0.0f);
+        // crown glass for convex lens; N-BK7
+        DispersiveMaterial<Float, Spectrum> glass_1 = DispersiveMaterial<Float, Spectrum>(1.5046f, 0.00420f);
+        // flint glass for concave lens; N-SF5
+        // std::vector<std::pair<float, float>> terms = {
+        //                                     std::pair(1.52481889f, 0.01125475600f), 
+        //                                     std::pair(0.187085527f, 0.0588995392f), 
+        //                                     std::pair(1.427290150f, 129.1416750f)};
+        // DispersiveMaterial<Float, Spectrum> glass_2 = DispersiveMaterial<Float, Spectrum>(terms);
+        // fake N-BK7 with a tweaked abbe number, to cancel `glass_1` and form a functional achromat
+        DispersiveMaterial<Float, Spectrum> glass_2 = DispersiveMaterial<Float, Spectrum>(1.5046f, 0.00860948454f);
+
+        std::cout << "Abbe numbers: V1 = " << glass_1.compute_abbe_number() << ", V2 = " << glass_2.compute_abbe_number() << "\n";
+        std::cout << "We should have V1 = 2 * V2.\n";
+        auto lens1 = new SphericalLensInterface<Float, Spectrum>(R, lens_radius, z_intercept, glass_1, air);
+        m_interfaces.push_back(lens1);
+        auto lens2 = new SphericalLensInterface<Float, Spectrum>(-R, lens_radius, z_intercept + thickness, glass_2, glass_1);
+        m_interfaces.push_back(lens2);
+        auto lens3 = new PlaneLensInterface<Float, Spectrum>(Normal3f(0.f,0.f,-1.f), lens_radius, z_intercept + 2.f * thickness, air, glass_2);
+        m_interfaces.push_back(lens3);
+
+        m_lens_aperture_z = z_intercept;
+        m_lens_aperture_radius = lens_radius;
+
+        // get a (conservative) estimate of the lens' total extent. This is used to launch
+        // rays from the outside world towards the lens body.
+        m_lens_terminal_z = m_interfaces.back()->get_z() + std::abs(R);
+
+        Float delta = focus_thick_lens(Float(distance));
+        // std::cout << "Pre-focus: " << delta << "\n";
+
+        // for (const auto &interface : m_interfaces) {
+        //     interface->offset_along_axis(-delta);
+        // }
+
+        // delta = focus_thick_lens(Float(distance));
+
+        std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
+    }
+
+
 
     void build_lens() {
         // float aperture_radius = 5.f;
@@ -535,8 +693,8 @@ public:
         m_lens_aperture_radius = 0.001f;
 
         // TODO: change to `new MyClass()` ? 
-        DispersiveMaterial<Float> air_material = DispersiveMaterial<Float>(1.0f, 0.0f);
-        DispersiveMaterial<Float> glass_material = DispersiveMaterial<Float>(1.5f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> air_material = DispersiveMaterial<Float, Spectrum>(1.0f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> glass_material = DispersiveMaterial<Float, Spectrum>(1.5f, 0.0f);
 
         // SphericalLensInterface<Float, Spectrum> lens(curvature_radius, aperture_radius, z_intercept, air_material, glass_material);
 
@@ -561,33 +719,62 @@ public:
         // TODO: re-enable
         m_lens_aperture_z = m_interfaces[0]->get_z();
         // m_lens_aperture_radius = m_interfaces[0]->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + std::abs(curvature_radius);
     }
 
-    std::tuple<Ray3f, Mask> trace_ray_through_lens(const Ray3f &ray) const {
+    std::tuple<Ray3f, Mask> trace_ray_from_film(const Ray3f &ray) const {
         Mask active = true;
         Ray3f curr_ray(ray);
-        // UInt32 lens_id = 0;
+        // TODO: dr::loop method causes a segfault :(
+        // size_t lens_id = 0;
 
         // dr::Loop<Mask> loop("trace", active, lens_id, curr_ray);
+        // std::cout << "======== NEW RAY ========" << std::endl;
         // while(loop(active)) {
-        //     auto [next_ray, next_active] = m_interfaces[lens_id]->compute_interaction(curr_ray);
-        //     curr_ray = next_ray;
+        //     auto [next_ray, next_active] = m_interfaces.at(lens_id)->compute_interaction(curr_ray);
+        //     // curr_ray = next_ray;
+        //     // curr_ray = Ray3f(next_ray.o, next_ray.d, next_ray.maxt, next_ray.time, next_ray.wavelengths);
+        //     std::cout << "==== Index: " << lens_id << " ====\n";
+        //     // std::cout << curr_ray << ",\t";
+        //     std::cout << next_active << ",\t";
+        //     std::cout << next_ray << "\n\n";
+    
+        //     // std::cout << "B1\n";
+
+        //     curr_ray.o = next_ray.o;
+        //     curr_ray.d = next_ray.d;
+        //     curr_ray.maxt = next_ray.maxt;
+        //     curr_ray.time = next_ray.time;
+        //     curr_ray.wavelengths = next_ray.wavelengths;
+        //     // std::cout << "B2\n";
         //     lens_id += 1;
+        //     // std::cout << "B3\n";
         //     active &= next_active && (lens_id < m_interfaces.size());
+        //     // std::cout << "B4\n";
+        //     // active &= (lens_id < m_interfaces.size());
+        //     std::cout << "==== index complete ====\n";
         // }
+        // std::cout << "======== END RAY ========" << std::endl;
 
+        // std::cout << "B5\n";
 
-        // std::cout << active << ", ";
+        // std::cout << "======== NEW RAY ========" << std::endl;
         for (const auto &interface : m_interfaces) {
             // TODO: is it better to mask?
             // TODO: actually, replace this with a dr::loop! then while-loop through
             // all the lens elements and add `&& active` to the conditional. rays that
             // fail will terminate early and have active == false
                         // ray_ = interface->compute_interaction(ray_, active);
-            auto [next_ray, active_] = interface->compute_interaction(curr_ray);
 
-            active &= active_;
+            // std::cout << "==== Index: ====\n";
+            auto [next_ray, next_active] = interface->compute_interaction(curr_ray);
 
+            // std::cout << next_active << ",\t";
+            // std::cout << next_ray << "\n\n";
+
+            active &= next_active;
+
+            // std::cout << "==== index complete ====\n";
             if (dr::none_or<false>(active)) {
                 break;
             }
@@ -600,14 +787,91 @@ public:
             //             << ", " << ray_.d.y()
             //             << ", " << ray_.d.z();
         }
-        // std::cout << active << std::endl;
-        // std::cout << ray_.o << ", " << ray_.d << std::endl;
+        // std::cout << "======== END RAY ========" << std::endl;
         
         return { curr_ray, active };
     }
 
+    // Traces a ray from the world side of the lens to the film side. The input
+    // `ray` is assumed to be represented in camera space.
+    std::tuple<Ray3f, Mask> trace_ray_from_world(const Ray3f &ray) const {
+        Mask active = true;
+        Ray3f curr_ray(ray);
+        // TODO: switch to dr::loop when trace_ray_from_film() issue is fixed
 
-    void draw_ray_through_lens(const Ray3f &ray, const Point3f p_film) const {
+        // std::cout << "======== NEW RAY ========" << std::endl;
+        for (int lens_id = m_interfaces.size() - 1; lens_id >= 0; lens_id--) {
+            // std::cout << "==== Index: ====\n";
+            auto [next_ray, next_active] = m_interfaces[lens_id]->compute_interaction(curr_ray);
+
+            // std::cout << next_active << ",\t";
+            // std::cout << next_ray << "\n\n";
+
+            active &= next_active;
+
+            // std::cout << "==== index complete ====\n";
+            if (dr::none_or<false>(active)) {
+                break;
+            }
+
+            curr_ray = next_ray;
+        }
+        // std::cout << "======== END RAY ========" << std::endl;
+        
+        return { curr_ray, active };
+    }
+
+    // Test the two tracing functions against each other; according to 
+    // reciprocity, we should have ray_out == ray_in.
+    // 
+    // NOTE: this doesn't seem to work that well, with errors in the range
+    // of 1e-5 (position) and 3e-4 (direction). I'm not sure if there is 
+    // something genuinely wrong with the implemented tracing methods, or
+    // if it's due to stuff like the spawn_ray() method (which spawns rays
+    // at an offset from the surface to mitigate intersection tolerance
+    // issues).
+    // TODO: also check if there are issues with unnormalized directions.
+    // the data I collected for 2 refractions had ||d||**2 ~ 1 +- 1e-7, 
+    // but it might get worse with more interactions?
+    Mask test_trace_ray_from_world(const Ray3f &ray) const {
+        Ray3f film_ray = Ray3f(ray, dr::Infinity<Float>);
+        auto [world_ray, active] = trace_ray_from_film(film_ray);
+
+        // if the film ray doesn't even reach the world side, there's
+        // no point in checking trace_ray_from_world()
+        if (dr::none_or<false>(active)) {
+            std::cout << "A\n";
+            return true;
+        }
+
+        auto [out_ray, active_] = trace_ray_from_world(world_ray.reverse());
+
+        // the film->world trace was performed successfully. If the backwards
+        // trace doesn't work, something must be wrong with either algorithm
+        if (dr::any_or<true>(!active_)) {
+            std::cout << "B\n";
+            return false;
+        }
+
+        // Trace the lens[0] intersection back to the aperture plane
+        out_ray.o = out_ray((m_lens_aperture_z - out_ray.o.z()) * dr::rcp(out_ray.d.z()));
+
+        // check that init_ray and backward(forward(init_ray)) are equal
+        out_ray = out_ray.reverse();
+        // Float err = 0.5f * (dr::norm(out_ray.o - film_ray.o) + dr::norm(out_ray.d - film_ray.d));
+
+        std::cout << "Err1: " << dr::norm(out_ray.o - film_ray.o) 
+                  << ", err2: " << dr::norm(dr::cross(out_ray.d, film_ray.d)) << "\n";
+
+        // TODO: is this the right epsilon to use?
+        Float tol = math::RayEpsilon<Float> * m_interfaces.size() * 2;
+        return dr::norm(out_ray.o - film_ray.o) < tol && 
+               dr::norm(dr::cross(out_ray.d, film_ray.d)) < tol;
+    }
+
+
+
+    void draw_ray_from_film(const Ray3f &ray, const Point3f p_film) const {
         Mask active = true;
         Ray3f curr_ray(ray);
 
@@ -648,6 +912,123 @@ public:
         std::cout   << std::endl;
     }
 
+
+    void draw_ray_from_world(const Ray3f &ray) const {
+        Mask active = true;
+        Ray3f curr_ray(ray);
+
+        for (int lens_id = m_interfaces.size() - 1; lens_id >= 0; lens_id--) {
+            std::cout   << curr_ray.o.x() 
+                << ", " << curr_ray.o.y() 
+                << ", " << curr_ray.o.z() 
+                << ", " << curr_ray.d.x()
+                << ", " << curr_ray.d.y()
+                << ", " << curr_ray.d.z()
+                << ", " << active;
+            std::cout   << ",\t";
+
+
+            // std::cout << "Lens id: " << lens_id << "\t";
+            auto [next_ray, active_] = m_interfaces[lens_id]->compute_interaction(curr_ray);
+            active &= active_;
+            if (dr::none_or<false>(active)) { break; }
+            curr_ray = next_ray;
+        }
+        std::cout   << curr_ray.o.x() 
+            << ", " << curr_ray.o.y() 
+            << ", " << curr_ray.o.z() 
+            << ", " << curr_ray.d.x()
+            << ", " << curr_ray.d.y()
+            << ", " << curr_ray.d.z()
+            << ", " << active;
+        std::cout   << ",\t";
+
+        // Trace the lens[0] intersection back to the aperture plane
+        curr_ray.o = curr_ray((m_lens_aperture_z - curr_ray.o.z()) * dr::rcp(curr_ray.d.z()));
+
+        std::cout   << curr_ray.o.x() 
+            << ", " << curr_ray.o.y() 
+            << ", " << curr_ray.o.z() 
+            << ", " << curr_ray.d.x()
+            << ", " << curr_ray.d.y()
+            << ", " << curr_ray.d.z()
+            << ", " << active;
+
+        std::cout   << std::endl;
+    }
+
+    // Compute the axial positions of the principal plane and paraxial
+    // focus from either the object (world) or image (film) sides of 
+    // the lens. `start_ray` and `end_ray` are the ray segments before/
+    // after tracing through the lens respectively.
+    // NOTE: for simplicity, we consider rays that are launched from the
+    // x-axis only (rather than arbitrary (x,y,0)). 
+    void compute_cardinal_points(const Ray3f& start_ray, const Ray3f& end_ray, 
+                                Float& z_p, Float& z_f) const {
+        Float t_focus = -end_ray.o.x() / end_ray.d.x();
+        z_f = end_ray(t_focus).z();
+        Float t_plane = (start_ray.o.x() - end_ray.o.x()) / end_ray.d.x();
+        z_p = end_ray(t_plane).z();
+    }
+
+    void compute_thick_lens_approximation(Float& back_plane_z, Float& back_focal_length, 
+                                          Float& front_plane_z, Float& front_focal_length) const {
+        // set radial distance for estimating the paraxial quantities
+        Float r = 0.001f * m_film->get_physical_size().x();
+
+        // object (world)-side quantities
+        Float obj_plane, obj_focus;
+        Ray3f obj_ray = Ray3f(
+            Point3f(r, 0.f, m_lens_terminal_z + 1.0f), 
+            Vector3f(0.f, 0.f, -1.f),
+            0.0f,
+            Wavelength(589.3f));
+
+        auto [obj_end_ray, active] = trace_ray_from_world(obj_ray);
+
+        if (dr::none_or<false>(active)) {
+            Throw("compute_thick_lens_approximation: world ray was not transmitted through lens!");
+        }
+
+        compute_cardinal_points(obj_ray, obj_end_ray, obj_plane, obj_focus);
+        back_plane_z = obj_plane;
+        // back_focal_length = obj_focus - obj_plane;
+        back_focal_length = obj_plane - obj_focus;
+        std::cout << "\nback_plane: " << back_plane_z << ", focal: " << obj_focus << std::endl;
+
+        // image (film)-side quantities
+        Float img_plane, img_focus;
+        Ray3f img_ray = Ray3f(
+            Point3f(r, 0.f, m_lens_aperture_z - 1.0f), 
+            Vector3f(0.f, 0.f, 1.f),
+                        0.0f,
+            Wavelength(589.3f));
+
+        auto [img_end_ray, active_] = trace_ray_from_film(img_ray);
+
+        draw_ray_from_film(img_ray, Point3f(0.0f));
+
+        if (dr::none_or<false>(active_)) {
+            Throw("compute_thick_lens_approximation: film ray was not transmitted through lens!");
+        }
+
+        compute_cardinal_points(img_ray, img_end_ray, img_plane, img_focus);
+        front_plane_z = img_plane;
+        front_focal_length = img_focus - img_plane;
+        std::cout << "\nfront_plane: " << front_plane_z << ", focal: " << img_focus << std::endl;
+    }
+
+    Float focus_thick_lens(Float focus_distance) {
+        // NOTE: the film-to-object distance must be at least four focal lengths: otherwise,
+        // the image becomes virtual and nothing will be on the film plane (numerically, this
+        // also results in a sqrt(-x) error).
+        // To resolve this issue, we clamp the focus distance to be at least 4 * f_img
+        Float p_img, f_img, p_obj, f_obj;
+        compute_thick_lens_approximation(p_img, f_img, p_obj, f_obj);
+        Float tmp = dr::maximum(focus_distance, 4.01f * f_img) - p_obj;
+        Float delta = 0.5f * (p_img - tmp + dr::sqrt(dr::sqr(p_img + tmp) - 4 * f_img * (p_img + tmp)));
+        return delta;
+    }
 
 
     void traverse(TraversalCallback *callback) override {
@@ -717,10 +1098,12 @@ public:
         ray.time = time;
         ray.wavelengths = wavelengths;
 
+        // std::cout << "Wave weight: " << wav_weight << "\n";
+
         // STAGE 1: FILM SAMPLING
 
         // Compute the sample position on the near plane (local camera space).
-        // Point3f near_p = m_sample_to_camera *
+        // Point3f film_p = m_sample_to_camera *
         //                 Point3f(position_sample.x(), position_sample.y(), 0.f);
         // ------------------------
 
@@ -728,7 +1111,7 @@ public:
         // the physical location of a point on the film, expressed in local camera space. 
         // The film occupies [-xmax, xmax] x [-ymax, ymax] x [0,0]. Meanwhile, 
         // `position_sample` is a uniform 2D sample distributed on [0,1]^2.
-        Point3f near_p = m_sample_to_film *
+        Point3f film_p = m_sample_to_film *
                         Point3f(position_sample.x(), position_sample.y(), 0.f);
 
         // STAGE 2: APERTURE SAMPLING
@@ -746,7 +1129,7 @@ public:
         // STAGE 3: RAY SETUP
 
         // // Sampled position on the focal plane
-        // Point3f focus_p = near_p * (m_focus_distance / near_p.z());
+        // Point3f focus_p = film_p * (m_focus_distance / film_p.z());
 
         // // Convert into a normalized ray direction; adjust the ray interval accordingly.
         // Vector3f d = dr::normalize(Vector3f(focus_p - aperture_p));
@@ -762,27 +1145,36 @@ public:
 
         // Set up the film->pupil ray. The ray starts at `aperture_p` and is directed
         //  along the vector connecting `film_p` and `aperture_p`
-        Vector3f d = dr::normalize(Vector3f(aperture_p - near_p));
+        // std::cout << "A\n";
+        Vector3f d = dr::normalize(Vector3f(aperture_p - film_p));
         ray.o = aperture_p;
         ray.d = d;
 
         // std::cout << ray.o << std::endl;
 
         // Trace the ray through the lens
-        auto [ray_out, active_out] = trace_ray_through_lens(ray);
+        // std::cout << "B: tracing pixel, " << position_sample << ", " << aperture_sample << "\n";
+        auto [ray_out, active_out] = trace_ray_from_film(ray);
+        // std::cout << "C\n";
         Vector3f d_out(ray_out.d);
+        // std::cout << "D\n";
 
         // std::cout << active_out << ", " << active << ", " << wav_weight << std::endl;
 
         active &= active_out;
 
+        // std::cout << "E\n";
         // Kill rays that don't get through the lens
-        // TODO
         dr::masked(wav_weight, !active) = dr::zeros<Spectrum>();
-
-        // draw_ray_through_lens(ray, near_p);
         // std::cout << d_out << ",\t" << wav_weight << ",\t" << active << "\n";
 
+        // draw_ray_from_film(ray, film_p);
+        // std::cout << ", ";
+        // draw_ray_from_world(ray_out.reverse());
+        
+
+
+        // std::cout << "F\n";
 
         // Convert ray_out from camera to world space
         // dr::masked(ray_out, active) = m_to_world.value() * ray_out;
@@ -801,6 +1193,9 @@ public:
         ray_out.o += ray_out.d * near_t;
         ray_out.maxt = far_t - near_t;
 
+        // std::cout << "G\n";
+
+        // std::cout << "Reciprocity test: " << test_trace_ray_from_world(ray) << std::endl;
 
         // std::cout << ray_out.o << ",\t" << ray_out.d << ",\t" << ray_out.maxt << std::endl;
 
@@ -826,7 +1221,7 @@ public:
     //     ray.wavelengths = wavelengths;
 
     //     // Compute the sample position on the near plane (local camera space).
-    //     Point3f near_p = m_sample_to_camera *
+    //     Point3f film_p = m_sample_to_camera *
     //                     Point3f(position_sample.x(), position_sample.y(), 0.f);
 
     //     // Aperture position
@@ -834,10 +1229,10 @@ public:
     //     Point3f aperture_p(tmp.x(), tmp.y(), 0.f);
 
     //     // Sampled position on the focal plane
-    //     Float f_dist = m_focus_distance / near_p.z();
-    //     Point3f focus_p   = near_p          * f_dist,
-    //             focus_p_x = (near_p + m_dx) * f_dist,
-    //             focus_p_y = (near_p + m_dy) * f_dist;
+    //     Float f_dist = m_focus_distance / film_p.z();
+    //     Point3f focus_p   = film_p          * f_dist,
+    //             focus_p_x = (film_p + m_dx) * f_dist,
+    //             focus_p_y = (film_p + m_dy) * f_dist;
 
     //     // Convert into a normalized ray direction; adjust the ray interval accordingly.
     //     Vector3f d = dr::normalize(Vector3f(focus_p - aperture_p));
@@ -945,7 +1340,7 @@ private:
     Vector3f m_dx, m_dy;
     // std::vector<std::unique_ptr<LensInterface<Float, Spectrum>>> m_interfaces;
     std::vector<LensInterface<Float, Spectrum>*> m_interfaces;
-    float m_lens_aperture_z, m_lens_aperture_radius;
+    float m_lens_aperture_z, m_lens_aperture_radius, m_lens_terminal_z;
 };
 
 MI_IMPLEMENT_CLASS_VARIANT(RealisticLensCamera, ProjectiveCamera)
