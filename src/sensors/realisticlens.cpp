@@ -441,7 +441,7 @@ class SphericalLensInterface final : public LensInterface<Float, Spectrum> {
 
         void offset_along_axis(Float delta) override {
             LensInterface<Float, Spectrum>::m_z_intercept += delta;
-            m_center = Point3f(m_center.x(), m_center.y(), m_center.z() + delta);
+            m_center = Point3f(m_center.x(), m_center.y(), LensInterface<Float, Spectrum>::m_z_intercept + m_curvature_radius);
         }
 
         std::string to_string() const override {
@@ -580,11 +580,10 @@ public:
         Float lens_diameter = 0.01f;
         build_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
 
-        Float bp(0.0), bfl(0.0), fp(0.0), ffl(0.0);
-        compute_thick_lens_approximation(bp, bfl, fp, ffl);
-
-        std::cout << "Principal planes: z = " << bp << ", " << fp << "\n";
-        std::cout << "Focal lengths: back = " << bfl << ", front = " << ffl << "\n";
+        // Float bp(0.0), bfl(0.0), fp(0.0), ffl(0.0);
+        // compute_thick_lens_approximation(bp, bfl, fp, ffl);
+        // std::cout << "Principal planes: z = " << bp << ", " << fp << "\n";
+        // std::cout << "Focal lengths: back = " << bfl << ", front = " << ffl << "\n";
 
         // compute_exit_pupil_bounds();
 
@@ -646,7 +645,7 @@ public:
         // rays from the outside world towards the lens body.
         m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(curvature_radius);
 
-        Float delta = focus_thick_lens(Float(distance));
+        Float delta = focus_thick_lens(distance);
         Float tmp = -distance / (1.f - distance / curvature_radius);
 
         std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
@@ -683,21 +682,25 @@ public:
         auto lens3 = new PlaneLensInterface<Float, Spectrum>(Normal3f(0.f,0.f,-1.f), lens_radius, z_intercept + 2.f * thickness, glass_2, air);
         m_interfaces.push_back(lens3);
 
-        m_lens_aperture_z = z_intercept;
-        m_lens_aperture_radius = lens_radius;
+        Float delta = focus_thick_lens(distance);
+        std::cout << "Pre-focus: " << delta << "\n";
+        // draw_cross_section(16);
 
+        for (const auto &interface : m_interfaces) {
+            std::cout << interface->get_z() << ", ";
+            interface->offset_along_axis(-delta);
+            std::cout << interface->get_z() << "\n";
+        }
+
+        m_lens_aperture_z = m_interfaces.front()->get_z();
+        m_lens_aperture_radius = m_interfaces.front()->get_radius();
         // get a (conservative) estimate of the lens' total extent. This is used to launch
         // rays from the outside world towards the lens body.
         m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(R);
 
-        Float delta = focus_thick_lens(Float(distance));
-        // std::cout << "Pre-focus: " << delta << "\n";
+        // draw_cross_section(16);
 
-        // for (const auto &interface : m_interfaces) {
-        //     interface->offset_along_axis(-delta);
-        // }
-
-        // delta = focus_thick_lens(Float(distance));
+        delta = focus_thick_lens(distance);
 
         std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
     }
@@ -890,7 +893,6 @@ public:
         std::cout << "]";
 
     }
-
 
 
     // Traces a ray from the world side of the lens to the film side. The input
@@ -1248,11 +1250,11 @@ public:
         // ray.maxt = far_t - near_t;
         // ------------------------
 
-        // Set up the film->pupil ray. The ray starts at `aperture_p` and is directed
+        // Set up the film->pupil ray. The ray starts at `film_p` and is directed
         //  along the vector connecting `film_p` and `aperture_p`
         // std::cout << "A\n";
         Vector3f d = dr::normalize(Vector3f(aperture_p - film_p));
-        ray.o = aperture_p;
+        ray.o = film_p;
         ray.d = d;
 
         // std::cout << ray.o << std::endl;
