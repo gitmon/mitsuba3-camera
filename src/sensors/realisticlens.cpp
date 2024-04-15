@@ -3,6 +3,7 @@
 #include <mitsuba/core/transform.h>
 #include <mitsuba/core/bbox.h>
 #include <mitsuba/core/warp.h>
+#include <mitsuba/core/qmc.h>
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -610,7 +611,6 @@ public:
         ScalarVector2i size = m_film->size();
         m_x_fov = (ScalarFloat) parse_fov(props, size.x() / (double) size.y());
 
-        std::string lens_type = props.get<std::string>("lens_design", "singlet");
 
         m_aperture_radius = props.get<ScalarFloat>("aperture_radius");
 
@@ -628,6 +628,8 @@ public:
 
         run_tests();
         
+        std::string lens_type = props.get<std::string>("lens_design", "singlet");
+
         Float object_distance, focal_length, lens_diameter;
         object_distance = props.get<Float>("object_distance", 6.0f);
         focal_length    = props.get<Float>("focal_length",    0.05f);
@@ -645,6 +647,18 @@ public:
             build_thin_lens(object_distance, focal_length, lens_diameter / 2);
         }
 
+        m_qmc_sampler = new RadicalInverse();
+
+        // std::cout << "[";
+        // for (size_t i = 0; i < 1024; ++i) {
+        //     std::cout << "[" << m_qmc_sampler->eval<Float>(0, i)
+        //               << "," << m_qmc_sampler->eval<Float>(1, i) 
+        //               << "],\n";
+        // }
+        // std::cout << "]\n";
+
+
+
         // Float object_distance = 0.5f;
         // Float focal_length = 0.05f;
         // Float lens_diameter = 0.005f;
@@ -653,23 +667,72 @@ public:
         // Float lens_diameter = 0.02f;
         // build_plano_lens(Float(0.02f), Float(0.01f), lens_diameter / 2, lens_diameter / 10);
 
-        // compute_exit_pupil_bounds();
+        compute_exit_pupil_bounds();
+        // loop_v1();
+        // loop_v2();
 
     }
 
-    void loop_v1() const {
-        float xmin = 0.0f, xmax = 0.5f;
-        int N = 20;
+    void loop_v1(float xmin = 0.0f, float xmax = 0.005f, size_t N = 6) const {
         float dx = (xmax - xmin) / ((float) N - 1.f);
 
-        for (int i = 0; i < N; ++i) {
-            Vector3f o(i * dx, 0.f, 0.f);
+        for (size_t i = 0; i < N; ++i) {
+            Vector3f o(i * dx, 0.f, -1.f);
             Vector3f d(0.f, 0.f, 1.f);
-            Ray3f ray = Ray3f(o, d);
+            Ray3f ray = Ray3f(o, d, 0.0f, Wavelength(589.3f));
             draw_ray_from_film(ray);
-            std::cout << "\n";
         }
         std::cout << std::endl;
+    }
+
+    void loop_v2(float xmin = 0.0f, float xmax = 0.005f, size_t N = 6) const {
+        // auto [nodes, weights] = quad::gauss_legendre<FloatX>(res);
+        // dr::zeros<Float>(dr::width(wi));
+        // auto [nodes_x, nodes_y]     = dr::meshgrid(nodes, nodes);
+        // using FloatP = dr::Packet<dr::scalar_t<Float>>;
+        // using Normal3fP = Normal<FloatP, 3>;
+        // using Vector3fP = Vector<FloatP, 3>;
+
+        /* Floats and packets of floats */
+        using ScalarFloat = dr::scalar_t<Float>;
+        using FloatX = dr::DynamicArray<ScalarFloat>;
+
+        /* 2D vectors and static/dynamic packets of 2D vectors */
+        using Vector2f  = dr::Array<ScalarFloat, 2>;
+        using Vector2fX = dr::Array<FloatX, 2>;
+
+        /* 3D vectors and static/dynamic packets of 3D vectors */
+        using Vector3f  = dr::Array<ScalarFloat, 3>;
+        using Vector3fX = dr::Array<FloatX, 3>;
+
+        /* rays and static/dynamic packets of rays */
+        using Ray3f     = Ray<Vector3f, Spectrum>;
+        using Ray3fX    = Ray<Vector3fX, Spectrum>;
+
+        // this appears to be the right set of types, but our methods don't wanna accept them
+        // anyway, the vectorization procedure is much more involved than expected: it's not 
+        // just replacing the scalar inputs with vector ones. refer to Integrator::render() in
+        // integrator.cpp for details - you still have to call parallel_for() (CPU) or split
+        // computation into threadblocks (GPU)
+        auto xs = dr::linspace<FloatX>(xmin, xmax, N);
+        std::cout << xs << std::endl;
+        Vector3fX points = Vector3fX(xs, xs, xs);
+        std::cout << points << std::endl;
+
+        // Vector3fX o(xs, 0.f, -1.f);
+        // Vector3fX d(dr::zeros<FloatX>(N), 0.f, 1.f);
+
+        // // based on integrator.cpp, scalar inputs for `time` and `wavelength_sample` should be
+        // // correct
+        
+        // Ray3fX rays(o, d, 0.0f, Wavelength(589.3f));
+
+        // // none of these work
+
+        // draw_ray_from_film(ray);
+        // dr::vectorize([](auto &&ray) { return trace_ray_from_film(ray); }, ray);
+        // auto [rays_out, mask] = trace_ray_from_film(rays);
+        // sample_ray(0.0f, 0.0f, Vector2fX(xs, xs), Vector2fX(xs,xs), true);
     }
 
 
@@ -705,10 +768,13 @@ public:
         // std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
 
 
+        std::cout << "Lens init: focusing thick lens.\n";
+
         Float delta = focus_thick_lens(distance);
         for (const auto &interface : m_interfaces) {
             interface->offset_along_axis(-delta);
         }
+        std::cout << "Thick lens focused. delta: " << -delta << std::endl;
 
         // draw_cross_section(16);
 
@@ -980,56 +1046,104 @@ public:
     }
 
 
-    // void compute_exit_pupil_bounds() {
-    //     int num_segments = 64;
-    //     int rays_per_segment = 1024 * 1024;
-    //     m_exit_pupil_bounds.resize(num_segments);
-    //     Float diagonal = dr::norm(m_film->get_physical_size());
+    void compute_exit_pupil_bounds() {
+        // NOTE: this only evaluates the exit pupil shape for a fixed wavelength! 
+        // the resulting approximate sample area may or may not work for all other
+        // wavelengths in the spectrum
+        size_t num_segments = 16; // 64;
+        size_t rays_per_segment = 64; // 1024 * 1024;
+        m_exit_pupil_bounds.resize(num_segments);
+        Float diagonal = dr::norm(m_film->get_physical_size());
 
-    //     Float rear_radius = m_interfaces[0]->get_radius() * 1.5f;
-    //     Float rear_z = m_interfaces[0]->get_z();
-    //     BoundingBox2f rear_bounds(
-    //         Point2f(-rear_radius, -rear_radius),
-    //         Point2f( rear_radius,  rear_radius));
+        Float rear_radius = m_interfaces.front()->get_radius() * 1.5f * 0.01f; // XXX
+        Float rear_z = m_interfaces.front()->get_z();
+        // BoundingBox2f rear_bounds(
+        //     Point2f(-rear_radius, -rear_radius),
+        //     Point2f( rear_radius,  rear_radius));
 
-    //     // TODO: dr::loop?
-    //     for (int i = 0; i < num_segments; ++i) {
-    //         // TODO: initialization
-    //         BoundingBox2f pupil_bound(Point3f(0.0f));
-    //         pupil_bound.reset();
-    //         Float r0 = i * diagonal / num_segments;
-    //         Float r1 = (i + 1) * diagonal / num_segments;
+        for (size_t segment_id = 0; segment_id < num_segments; ++segment_id) {
+            // TODO: initialization
+            // BoundingBox2f pupil_bound(Point2f(0.0f));
+            // pupil_bound.reset();
 
-    //         // initialize and launch rays
-    //         for (int j = 0; j < rays_per_segment; ++j) {
-    //             Point3f p_film(dr::lerp(r0, r1, (j + 0.5f) / rays_per_segment), 
-    //                 0.0f, 
-    //                 0.0f);
-    //             // TODO: replace m_sampler with radical_inverse_2(j)
-    //             // (using the sampler here is a waste of random numbers. we just need
-    //             // a well-distributed 2d grid of points, not doing MC integration)
-    //             Point3f p_rear(
-    //                 dr::lerp(-rear_radius, rear_radius, m_sampler->next_1d()),
-    //                 dr::lerp(-rear_radius, rear_radius, m_sampler->next_1d()),
-    //                 rear_z);
+            Point2f bbox_min = dr::Infinity<Point2f>,
+                    bbox_max = -dr::Infinity<Point2f>;
+
+            Float r0 = segment_id * diagonal / num_segments;
+            Float r1 = (segment_id + 1) * diagonal / num_segments;
+
+            // // LOGGING
+            // std::cout << " ===== Segment {" << segment_id 
+            //           << "}, r = [" << r0 
+            //           << ", "       << r1 
+            //           << "] ===== \n";
+
+
+            // initialize and launch rays
+            // TODO: dr::arange?
+            for (size_t i = 0; i < rays_per_segment; ++i) {
+                Point3f p_film = Point3f(dr::lerp(r0, r1, 0.5f), 0.f, 0.f);
+                // XXX
+                // Point3f p_film = Point3f(
+                //     dr::lerp(r0, r1, (i + 0.5f) / rays_per_segment), 0.f, 0.f);
+                Point3f p_rear(
+                    dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(0, i)),
+                    dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(1, i)),
+                    rear_z);
                 
-    //             Ray3f ray(p_rear, dr::normalize(Vector3f(p_rear - p_film)));
-
-    //             // if (pupil_bound.contains(p_rear[x,y]) || trace_ray_from_film()) {
-    //             //     pupil_bound.expand(p_rear[x,y]);
-    //             // }
-
-
-    //             // auto [ray_out, active_out] = trace_ray_from_film(ray);
-    //             // Vector3f d_out(ray_out.d);
-    //             // active &= active_out;
+                Point2f p(p_rear.x(), p_rear.y());
                 
-    //         }
+                // set wavelength to 589.3nm
+                Ray3f ray(p_film, dr::normalize(Vector3f(p_rear - p_film)), 0.0f, Wavelength(589.3f));
 
-    //         m_exit_pupil_bounds[i] = pupil_bound;
-    //     }
+                // calculation is active if point is outside the current bound area
+                // Mask active = !pupil_bound.contains(Point2f(p_rear.x(), p_rear.y()));
+                Mask active = !dr::all((p >= bbox_min) && (p <= bbox_max));
 
-    // }
+                // // LOGGING
+                // std::cout << "\t ----- ray {"   << i << "} -----\n";
+                // // std::cout << "\tBbox size, "    << pupil_bound << ",\n"
+                // std::cout << "\tBbox size, "    << bbox_min << ", " << bbox_max << ",\n"
+                //           << "\tCurr ray: o = " << ray.o << ", d = " << ray.d << ",\n"
+                //           << "\t!contained: "   << active << ",\n";
+
+                if (dr::none_or<false>(active)) {
+                    continue;
+                }
+
+                auto [ray_out, active_out] = trace_ray_from_film(ray);
+                active &= active_out;
+
+                // draw_ray_from_film(Ray3f(p_film, dr::normalize(Vector3f(p_rear - p_film))));
+
+
+                // // LOGGING
+                // std::cout << "\tRay transmitted: " << active_out << ",\n";
+
+                // // only expand the pupil bbox if the ray was transmitted, 
+                // // i.e. active_out == active == true
+                // // std::cout << "\tBbox (before), " << pupil_bound.min << ", " << pupil_bound.max << ",\n";
+                // std::cout << "\tBbox (before): " << bbox_min << ", " << bbox_max << ",\n";
+
+                // bbox.expand(Point2f(p_rear.x(), p_rear.y()));
+                Point2f new_min = dr::minimum(bbox_min, p),
+                        new_max = dr::maximum(bbox_max, p);
+
+                dr::masked(bbox_min, active) = new_min;
+                dr::masked(bbox_max, active) = new_max;
+
+                // // LOGGING
+                // // std::cout << "\tBbox (after), " << pupil_bound.min << ", " << pupil_bound.max << ",\n";
+                // std::cout << "\tBbox (after): " << bbox_min << ", " << bbox_max << ",\n";
+            }
+
+            // TODO: handle zero transmission case
+            // TODO: expand by point spacing
+
+            // m_exit_pupil_bounds[segment_id] = pupil_bound;
+            m_exit_pupil_bounds[segment_id] = BoundingBox2f(bbox_min, bbox_max);
+        }
+    }
 
     void draw_cross_section(int num_points) const {
         size_t vtx_idx = 0;
@@ -1130,6 +1244,7 @@ public:
 
     // Test the two tracing functions against each other; according to 
     // reciprocity, we should have ray_out == ray_in.
+    // NOTE: only call this after the constructor is finished!!
     Mask test_trace_ray_from_world(const Ray3f &ray) const {
         Ray3f film_ray = Ray3f(ray, dr::Infinity<Float>);
         auto [world_ray, active] = trace_ray_from_film(film_ray);
@@ -1151,7 +1266,7 @@ public:
         }
 
         // Trace the lens[0] intersection back to the aperture plane
-        out_ray.o = out_ray((m_lens_aperture_z - out_ray.o.z()) * dr::rcp(out_ray.d.z()));
+        out_ray.o = out_ray((m_interfaces.front()->get_z() - out_ray.o.z()) * dr::rcp(out_ray.d.z()));
 
         // check that init_ray and backward(forward(init_ray)) are equal
         out_ray = out_ray.reverse();
@@ -1244,7 +1359,7 @@ public:
         std::cout   << ",\t";
 
         // Trace the lens[0] intersection back to the aperture plane
-        curr_ray.o = curr_ray((m_lens_aperture_z - curr_ray.o.z()) * dr::rcp(curr_ray.d.z()));
+        curr_ray.o = curr_ray((m_interfaces.front()->get_z() - curr_ray.o.z()) * dr::rcp(curr_ray.d.z()));
 
         std::cout   << curr_ray.o.x() 
             << ", " << curr_ray.o.y() 
@@ -1279,10 +1394,14 @@ public:
         // object (world)-side quantities
         Float obj_plane, obj_focus;
         Ray3f obj_ray = Ray3f(
-            Point3f(r, 0.f, m_lens_terminal_z + 1.0f), 
+            Point3f(r, 0.f, m_interfaces.back()->get_z() + 1.f), 
             Vector3f(0.f, 0.f, -1.f),
             0.0f,
             Wavelength(589.3f));
+
+        std::cout << "compute_thick_lens_approximation: " << r << ", " << obj_ray.o.z() << "\n";
+        std::cout << "compute_thick_lens_approximation: " << obj_ray.o << ", " << obj_ray.d << "\n";
+        draw_ray_from_world(obj_ray);
 
         auto [obj_end_ray, active] = trace_ray_from_world(obj_ray);
 
@@ -1294,19 +1413,19 @@ public:
         back_plane_z = obj_plane;
         // back_focal_length = obj_focus - obj_plane;
         back_focal_length = obj_plane - obj_focus;
-        std::cout << "\nback_plane: " << back_plane_z << ", focal: " << obj_focus << std::endl;
+        std::cout << "back_plane: " << back_plane_z << ", focal: " << obj_focus << std::endl;
 
         // image (film)-side quantities
         Float img_plane, img_focus;
         Ray3f img_ray = Ray3f(
-            Point3f(r, 0.f, m_lens_aperture_z - 1.0f), 
+            Point3f(r, 0.f, m_interfaces.front()->get_z() - 1.f), 
             Vector3f(0.f, 0.f, 1.f),
                         0.0f,
             Wavelength(589.3f));
 
-        auto [img_end_ray, active_] = trace_ray_from_film(img_ray);
-
         draw_ray_from_film(img_ray);
+
+        auto [img_end_ray, active_] = trace_ray_from_film(img_ray);
 
         if (dr::none_or<false>(active_)) {
             Throw("compute_thick_lens_approximation: film ray was not transmitted through lens!");
@@ -1315,7 +1434,7 @@ public:
         compute_cardinal_points(img_ray, img_end_ray, img_plane, img_focus);
         front_plane_z = img_plane;
         front_focal_length = img_focus - img_plane;
-        std::cout << "\nfront_plane: " << front_plane_z << ", focal: " << img_focus << std::endl;
+        std::cout << "front_plane: " << front_plane_z << ", focal: " << img_focus << std::endl;
     }
 
     Float focus_thick_lens(Float focus_distance) {
@@ -1640,6 +1759,7 @@ private:
     // std::vector<std::unique_ptr<LensInterface<Float, Spectrum>>> m_interfaces;
     std::vector<LensInterface<Float, Spectrum>*> m_interfaces;
     Float m_lens_aperture_z, m_lens_aperture_radius, m_lens_terminal_z;
+    ref<RadicalInverse> m_qmc_sampler;
 
 
 
