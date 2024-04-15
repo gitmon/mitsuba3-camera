@@ -610,6 +610,8 @@ public:
         ScalarVector2i size = m_film->size();
         m_x_fov = (ScalarFloat) parse_fov(props, size.x() / (double) size.y());
 
+        std::string lens_type = props.get<std::string>("lens_design", "singlet");
+
         m_aperture_radius = props.get<ScalarFloat>("aperture_radius");
 
         if (dr::all(dr::eq(m_aperture_radius, 0.f))) {
@@ -626,67 +628,50 @@ public:
 
         run_tests();
         
+        Float object_distance, focal_length, lens_diameter;
+        object_distance = props.get<Float>("object_distance", 6.0f);
+        focal_length    = props.get<Float>("focal_length",    0.05f);
+        lens_diameter   = props.get<Float>("lens_diameter",   0.01f);
+
+        if (lens_type == "singlet") {
+            build_thin_lens(object_distance, focal_length, lens_diameter / 2);
+        } else if (lens_type == "doublet") {
+            build_right_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
+        } else if (lens_type == "flipped_doublet") {
+            build_flipped_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
+        } else if (lens_type == "tessar") {
+            build_tessar_lens(object_distance);
+        } else {
+            build_thin_lens(object_distance, focal_length, lens_diameter / 2);
+        }
+
         // Float object_distance = 0.5f;
         // Float focal_length = 0.05f;
         // Float lens_diameter = 0.005f;
-        // build_thin_lens(object_distance, focal_length, lens_diameter / 2);        
-
-        // Float object_distance = 6.0f;
-        // Float focal_length = 0.05f;
-        // Float lens_diameter = 0.01f;
         // build_thin_lens(object_distance, focal_length, lens_diameter / 2);
-
-        // Float object_distance = 6.0f;
-        // Float focal_length = 0.05f;
-        // Float lens_diameter = 0.01f;
-        // build_flipped_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
-        // build_right_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
-        
-
-        Float object_distance = 6.0f;
-        build_tessar_lens(object_distance);
 
         // Float lens_diameter = 0.02f;
         // build_plano_lens(Float(0.02f), Float(0.01f), lens_diameter / 2, lens_diameter / 10);
 
-        // Float bp(0.0), bfl(0.0), fp(0.0), ffl(0.0);
-        // compute_thick_lens_approximation(bp, bfl, fp, ffl);
-        // std::cout << "Principal planes: z = " << bp << ", " << fp << "\n";
-        // std::cout << "Focal lengths: back = " << bfl << ", front = " << ffl << "\n";
-
         // compute_exit_pupil_bounds();
 
-        // float r = 6.f;
-        // float xmin, ymin, xmax, ymax;
-        // xmin = ymin = 0.f;
-        // xmax = ymax = r;
-        // int N = 20;
-        // float dx = (xmax - xmin) / ((float) N - 1.f);
-
-        // for (int i = 0; i < N; ++i) {
-        //     for (int j = 0; j < N; ++j) {
-        //         Vector3f o(i * dx, j * dx, 0.f);
-        //         Vector3f d(0.f, 0.f, 1.f);
-        //         Ray3f ray = Ray3f(o, d);
-
-        //         std::cout   << ray.o.x() 
-        //             << ", " << ray.o.y() 
-        //             << ", " << ray.o.z() 
-        //             << ", " << ray.d.x()
-        //             << ", " << ray.d.y()
-        //             << ", " << ray.d.z();
-        //         auto [ray_out, active] = trace_ray_from_film(ray);
-        //         std::cout   << "\n";
-        //         // std::cout   << ray_out.o.x() << ", " 
-        //         //             << ray_out.o.y() << ", " 
-        //         //             << ray_out.o.z() << ", " 
-        //         //             << ray_out.d.x() << ", "
-        //         //             << ray_out.d.y() << ", "
-        //         //             << ray_out.d.z() << "\n";
-        //     }
-        // }
-        // std::cout << std::endl;
     }
+
+    void loop_v1() const {
+        float xmin = 0.0f, xmax = 0.5f;
+        int N = 20;
+        float dx = (xmax - xmin) / ((float) N - 1.f);
+
+        for (int i = 0; i < N; ++i) {
+            Vector3f o(i * dx, 0.f, 0.f);
+            Vector3f d(0.f, 0.f, 1.f);
+            Ray3f ray = Ray3f(o, d);
+            draw_ray_from_film(ray);
+            std::cout << "\n";
+        }
+        std::cout << std::endl;
+    }
+
 
     void build_thin_lens(Float object_distance, Float curvature_radius, Float lens_radius) {
         // place the film plane at the image formation distance `xi` away from the lens
@@ -707,17 +692,30 @@ public:
         auto lens2 = new SpheroidLens<Float, Spectrum>(-curvature_radius, lens_radius, z_intercept + thickness, glass_material, air_material);
         m_interfaces.push_back(lens2);
 
-        m_lens_aperture_z = z_intercept;
-        m_lens_aperture_radius = lens_radius;
+        // m_lens_aperture_z = z_intercept;
+        // m_lens_aperture_radius = lens_radius;
 
-        // get a (conservative) estimate of the lens' total extent. This is used to launch
-        // rays from the outside world towards the lens body.
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(curvature_radius);
+        // // get a (conservative) estimate of the lens' total extent. This is used to launch
+        // // rays from the outside world towards the lens body.
+        // m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(curvature_radius);
+
+        // Float delta = focus_thick_lens(distance);
+        // Float tmp = -distance / (1.f - distance / curvature_radius);
+
+        // std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
+
 
         Float delta = focus_thick_lens(distance);
-        Float tmp = -distance / (1.f - distance / curvature_radius);
+        for (const auto &interface : m_interfaces) {
+            interface->offset_along_axis(-delta);
+        }
 
-        std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
+        // draw_cross_section(16);
+
+        m_lens_aperture_z = m_interfaces.front()->get_z();
+        m_lens_aperture_radius = m_interfaces.front()->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(curvature_radius);
+
     }
 
 
@@ -800,7 +798,7 @@ public:
             interface->offset_along_axis(-delta);
         }
 
-        draw_cross_section(16);
+        // draw_cross_section(16);
 
         m_lens_aperture_z = m_interfaces.front()->get_z();
         m_lens_aperture_radius = m_interfaces.front()->get_radius();
@@ -895,7 +893,7 @@ public:
         z_pos += t;
         m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * -35.034f, 0.001f * 18.f / 2, z_pos, NLAK9, air));
 
-        draw_cross_section(16);
+        // draw_cross_section(16);
 
         Float delta = focus_thick_lens(object_distance);
         for (const auto &interface : m_interfaces) {
