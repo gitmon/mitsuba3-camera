@@ -651,16 +651,6 @@ public:
 
         m_qmc_sampler = new RadicalInverse();
 
-        // std::cout << "[";
-        // for (size_t i = 0; i < 1024; ++i) {
-        //     std::cout << "[" << m_qmc_sampler->eval<Float>(0, i)
-        //               << "," << m_qmc_sampler->eval<Float>(1, i) 
-        //               << "],\n";
-        // }
-        // std::cout << "]\n";
-
-
-
         // Float object_distance = 0.5f;
         // Float focal_length = 0.05f;
         // Float lens_diameter = 0.005f;
@@ -669,11 +659,13 @@ public:
         // Float lens_diameter = 0.02f;
         // build_plano_lens(Float(0.02f), Float(0.01f), lens_diameter / 2, lens_diameter / 10);
 
+        std::cout << "Computing exit pupil LUT...\n";
         compute_exit_pupil_bounds();
+        std::cout << "LUT complete!\n";
         // loop_v1();
         // loop_v2();
-        // loop_v3();
-
+        std::cout << "Running loop_v3() ...\n";
+        loop_v3();
     }
 
     void loop_v1(float xmin = 0.0f, float xmax = 0.005f, size_t N = 6) const {
@@ -739,40 +731,42 @@ public:
     }
 
     void loop_v3() {
-        // std::vector<Float> points = {
-        //     Float(0.f),
-        //     Float(5.f),
-        //     Float(2.f),
-        //     Float(4.f),
-        //     Float(3.f),
-        // };
-
-        // DynamicBuffer<Float> p = dr::load<DynamicBuffer<Float>>(points.data(), 5);
-        // size_t i = 3;
-        // Float x0 = dr::gather<Float>(p, i);
-
-        // std::cout << x0 << std::endl;
-
-        std::vector<Point2f> points = {
-            Point2f(0.f,0.f),
-            Point2f(5.f,1.f),
-            Point2f(2.f,3.f),
-            Point2f(4.f,7.f),
-            Point2f(0.f,1.f),
+        // `Float` version of DynamicBuffer - this works fine
+        std::vector<Float> points = {
+            Float(0.f),
+            Float(5.f),
+            Float(2.f),
+            Float(4.f),
+            Float(3.f),
         };
 
-        DynamicBuffer<Point2f> p = dr::load<DynamicBuffer<Point2f>>(points.data(), points.size() * 2);
-        size_t i = 4;
-        
-        // compilation error when doing gather() on vector types
-        // XXX
-        // Point2f x0 = dr::gather<Point2f>(p, i); 
-
-        Point2f x0 = Point2f(
-            dr::gather<Float>(p, 2*i + 0),
-            dr::gather<Float>(p, 2*i + 1));
+        DynamicBuffer<Float> p = dr::load<DynamicBuffer<Float>>(points.data(), 5);
+        size_t i = 3;
+        Float x0 = dr::gather<Float>(p, i);
 
         std::cout << x0 << std::endl;
+
+        // // ==============================================================
+        // // `Point2f` version of DynamicBuffer - this doesn't work
+        // std::vector<Point2f> points = {
+        //     Point2f(0.f,0.f),
+        //     Point2f(5.f,1.f),
+        //     Point2f(2.f,3.f),
+        //     Point2f(4.f,7.f),
+        //     Point2f(0.f,1.f),
+        // };
+
+        // DynamicBuffer<Point2f> p = dr::load<DynamicBuffer<Point2f>>(points.data(), points.size() * 2);
+        // size_t i = 3;
+        
+        // // compilation error when doing gather() on vector types
+        // // Point2f x0 = dr::gather<Point2f>(p, i); 
+
+        // Point2f x0 = Point2f(
+        //     dr::gather<Float>(p, 2*i + 0),
+        //     dr::gather<Float>(p, 2*i + 1));
+
+        // std::cout << x0 << std::endl;
     }
 
 
@@ -1738,14 +1732,22 @@ public:
     //     return { ray, wav_weight };
     // }
 
+
+    // This method is mitsuba's version of pbrt's Sample_Wi(), which in turn
+    // is the sensor version of the emitters' Sample_Li(). Given some position p
+    // in the world, it samples one of the possible directions between the sensor 
+    // and p, and then evaluates the sensor's emitted importance along that direction.
+    // 
+    // to be specific, we must construct a path from p to a (fractional) pixel position 
+    // on the sensor film
     std::pair<DirectionSample3f, Spectrum>
     sample_direction(const Interaction3f &it, const Point2f &sample,
                      Mask active) const override {
-        // Transform the reference point into the local coordinate system
+        // Transform the reference point into the local coordinate system (no change)
         Transform4f trafo = m_to_world.value();
         Point3f ref_p = trafo.inverse().transform_affine(it.p);
 
-        // Check if it is outside of the clip range
+        // Check if it is outside of the clip range (no change)
         DirectionSample3f ds = dr::zeros<DirectionSample3f>();
         ds.pdf = 0.f;
         active &= (ref_p.z() >= m_near_clip) && (ref_p.z() <= m_far_clip);
@@ -1753,10 +1755,12 @@ public:
             return { ds, dr::zeros<Spectrum>() };
 
         // Sample a position on the aperture (in local coordinates)
+        // TODO: I guess this changes into sampling the rear plane?
         Point2f tmp = warp::square_to_uniform_disk_concentric(sample) * m_aperture_radius;
         Point3f aperture_p(tmp.x(), tmp.y(), 0);
 
         // Compute the normalized direction vector from the aperture position to the referent point
+        // TODO: 
         Vector3f local_d = ref_p - aperture_p;
         Float dist     = dr::norm(local_d);
         Float inv_dist = dr::rcp(dist);
