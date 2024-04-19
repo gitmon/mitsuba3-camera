@@ -28,3 +28,9 @@ __pycache__
 /docs/src/quickstart
 /docs/src/generated
 /docs/resources
+
+# Others
+/notebooks/scenes/staircase/
+
+*.exr
+*.txt

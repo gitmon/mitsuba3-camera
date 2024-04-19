@@ -4,6 +4,7 @@
 #include <mitsuba/core/bbox.h>
 #include <mitsuba/core/warp.h>
 #include <mitsuba/core/qmc.h>
+#define TEST_EXIT_PUPIL false
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -659,13 +660,22 @@ public:
         // Float lens_diameter = 0.02f;
         // build_plano_lens(Float(0.02f), Float(0.01f), lens_diameter / 2, lens_diameter / 10);
 
-        std::cout << "Computing exit pupil LUT...\n";
-        compute_exit_pupil_bounds();
-        std::cout << "LUT complete!\n";
-        // loop_v1();
-        // loop_v2();
-        std::cout << "Running loop_v3() ...\n";
-        loop_v3();
+        // std::cout << "Computing exit pupil LUT...\n";
+        // compute_exit_pupil_bounds();
+        // std::cout << "LUT complete!\n";
+        // // loop_v1();
+        // // loop_v2();
+        // std::cout << "Running loop_v3() ...\n";
+        // loop_v3();
+
+        if (TEST_EXIT_PUPIL) {
+            Float r_pupil = props.get<Float>("pupil_render_pos", 0.f);
+            Float wv = props.get<Float>("pupil_render_wv", 589.3f);
+            BoundingBox2f pupil_bound = bound_exit_pupil(r_pupil, r_pupil);
+            std::cout << "BBOX, " << pupil_bound.min.x() << ", " << pupil_bound.min.y() << ", "
+                                << pupil_bound.max.x() << ", " << pupil_bound.max.y() << "\n";
+            render_exit_pupil(r_pupil, wv, 1 << 20);
+        }
     }
 
     void loop_v1(float xmin = 0.0f, float xmax = 0.005f, size_t N = 6) const {
@@ -1075,17 +1085,96 @@ public:
         return { curr_ray, active };
     }
 
+    BoundingBox2f bound_exit_pupil(Float r0, Float r1) {
+        size_t rays_per_segment = 1024 * 1024;
+        Float rays_transmitted = 0;
+        Point2f bbox_min = dr::Infinity<Point2f>,
+                bbox_max = -dr::Infinity<Point2f>;
+        Float rear_radius = m_interfaces.front()->get_radius() * 1.5f;
+        Float rear_z = m_interfaces.front()->get_z();
+
+        for (size_t i = 0; i < rays_per_segment; ++i) {
+            Point3f p_film = Point3f(
+                dr::lerp(r0, r1, (i + 0.5f) / rays_per_segment), 0.f, 0.f);
+            Point3f p_rear(
+                dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(0, i)),
+                dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(1, i)),
+                rear_z);
+            
+            Point2f p(p_rear.x(), p_rear.y());
+            
+            // calculation is active if point is outside the current bound area
+            // Mask active = !pupil_bound.contains(Point2f(p_rear.x(), p_rear.y()));
+            Mask active = !dr::all((p >= bbox_min) && (p <= bbox_max));
+
+            // // LOGGING
+            // std::cout << "\t ----- ray {"   << i << "} -----\n";
+            // // std::cout << "\tBbox size, "    << pupil_bound << ",\n"
+            // std::cout << "\tBbox size, "    << bbox_min << ", " << bbox_max << ",\n"
+            //           << "\tCurr ray: o = " << ray.o << ", d = " << ray.d << ",\n"
+            //           << "\t!contained: "   << active << ",\n";
+
+            if (dr::none_or<false>(active)) {
+                continue;
+            }
+
+            Wavelength wavelength;
+            if constexpr (!is_spectral_v<Spectrum>) {
+                // use nominal wavelength
+                wavelength = Wavelength(589.3f);
+            } else {
+                // wavelength = dr::lerp(200.f, 700.f, (0.5f + (i & mask)) / num_wavelengths);
+                wavelength = dr::lerp(380.f, 700.f, m_qmc_sampler->eval<Float>(2, i));
+            }
+
+            Ray3f ray(p_film, dr::normalize(Vector3f(p_rear - p_film)), 0.0f, wavelength);
+
+            auto [ray_out, active_out] = trace_ray_from_film(ray);
+            active &= active_out;
+
+            // draw_ray_from_film(ray);
+
+            // // LOGGING
+            // std::cout << "\tRay transmitted: " << active_out << ",\n";
+            // // only expand the pupil bbox if the ray was transmitted, 
+            // // i.e. active_out == active == true
+            // // std::cout << "\tBbox (before), " << pupil_bound.min << ", " << pupil_bound.max << ",\n";
+            // std::cout << "\tBbox (before): " << bbox_min << ", " << bbox_max << ",\n";
+
+            // bbox.expand(Point2f(p_rear.x(), p_rear.y()));
+            Point2f new_min = dr::minimum(bbox_min, p),
+                    new_max = dr::maximum(bbox_max, p);
+
+            dr::masked(bbox_min, active) = new_min;
+            dr::masked(bbox_max, active) = new_max;
+            rays_transmitted += active;     // TODO: hsum?
+            // dr::masked(rays_transmitted, active) = rays_transmitted + 1;
+
+            // // LOGGING
+            // // std::cout << "\tBbox (after), " << pupil_bound.min << ", " << pupil_bound.max << ",\n";
+            // std::cout << "\tBbox (after): " << bbox_min << ", " << bbox_max << ",\n";
+        }
+
+
+        // handle zero transmission case
+        dr::masked(bbox_min, rays_transmitted == 0) = Point2f(-rear_radius, -rear_radius);
+        dr::masked(bbox_max, rays_transmitted == 0) = Point2f( rear_radius,  rear_radius);
+
+        // expand by sample-sample spacing on the rear plane
+        // TODO: i think there's an extra 2x factor that shouldn't be there?
+        Float spacing = 4 * rear_radius * dr::sqrt(2.f / rays_per_segment);
+        BoundingBox2f pupil_bound(bbox_min - spacing, bbox_max + spacing);
+
+        return pupil_bound;
+    }
+
     void compute_exit_pupil_bounds() {
         // NOTE: this only evaluates the exit pupil shape for a fixed wavelength! 
         // the resulting approximate sample area may or may not work for all other
         // wavelengths in the spectrum
         // TODO: handle wavelength dimension
-        size_t num_segments = 64;   // XXX
-        size_t rays_per_segment = 1024 * 1024; // XXX
+        size_t num_segments = 64;
         m_exit_pupil_bounds.resize(num_segments);
-
-        Float rear_radius = m_interfaces.front()->get_radius() * 1.5f;
-        Float rear_z = m_interfaces.front()->get_z();
 
         // TODO: workaround for bbox vector not working
         std::vector<Point2f> min_bounds = {}, max_bounds = {};
@@ -1093,9 +1182,6 @@ public:
         for (size_t segment_id = 0; segment_id < num_segments; ++segment_id) {
             // TODO: initialization
             // BoundingBox2f pupil_bound();
-
-            Point2f bbox_min = dr::Infinity<Point2f>,
-                    bbox_max = -dr::Infinity<Point2f>;
 
             Float r0 = segment_id * m_film_diagonal / num_segments;
             Float r1 = (segment_id + 1) * m_film_diagonal / num_segments;
@@ -1111,72 +1197,7 @@ public:
             // initialize and launch rays
             // TODO: dr::arange?
 
-            Float rays_transmitted = 0;
-
-            for (size_t i = 0; i < rays_per_segment; ++i) {
-                Point3f p_film = Point3f(
-                    dr::lerp(r0, r1, (i + 0.5f) / rays_per_segment), 0.f, 0.f);
-                Point3f p_rear(
-                    dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(0, i)),
-                    dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(1, i)),
-                    rear_z);
-                
-                Point2f p(p_rear.x(), p_rear.y());
-                
-                // set wavelength to 589.3nm
-                Ray3f ray(p_film, dr::normalize(Vector3f(p_rear - p_film)), 0.0f, Wavelength(589.3f));
-
-                // calculation is active if point is outside the current bound area
-                // Mask active = !pupil_bound.contains(Point2f(p_rear.x(), p_rear.y()));
-                Mask active = !dr::all((p >= bbox_min) && (p <= bbox_max));
-
-                // // LOGGING
-                // std::cout << "\t ----- ray {"   << i << "} -----\n";
-                // // std::cout << "\tBbox size, "    << pupil_bound << ",\n"
-                // std::cout << "\tBbox size, "    << bbox_min << ", " << bbox_max << ",\n"
-                //           << "\tCurr ray: o = " << ray.o << ", d = " << ray.d << ",\n"
-                //           << "\t!contained: "   << active << ",\n";
-
-                if (dr::none_or<false>(active)) {
-                    continue;
-                }
-
-                auto [ray_out, active_out] = trace_ray_from_film(ray);
-                active &= active_out;
-
-                // draw_ray_from_film(ray);
-
-
-                // // LOGGING
-                // std::cout << "\tRay transmitted: " << active_out << ",\n";
-                // // only expand the pupil bbox if the ray was transmitted, 
-                // // i.e. active_out == active == true
-                // // std::cout << "\tBbox (before), " << pupil_bound.min << ", " << pupil_bound.max << ",\n";
-                // std::cout << "\tBbox (before): " << bbox_min << ", " << bbox_max << ",\n";
-
-                // bbox.expand(Point2f(p_rear.x(), p_rear.y()));
-                Point2f new_min = dr::minimum(bbox_min, p),
-                        new_max = dr::maximum(bbox_max, p);
-
-                dr::masked(bbox_min, active) = new_min;
-                dr::masked(bbox_max, active) = new_max;
-                rays_transmitted += active;     // TODO: hsum?
-                // dr::masked(rays_transmitted, active) = rays_transmitted + 1;
-
-                // // LOGGING
-                // // std::cout << "\tBbox (after), " << pupil_bound.min << ", " << pupil_bound.max << ",\n";
-                // std::cout << "\tBbox (after): " << bbox_min << ", " << bbox_max << ",\n";
-            }
-
-            // handle zero transmission case
-            dr::masked(bbox_min, rays_transmitted == 0) = Point2f(-rear_radius, -rear_radius);
-            dr::masked(bbox_max, rays_transmitted == 0) = Point2f( rear_radius,  rear_radius);
-
-            // expand by sample-sample spacing on the rear plane
-            // TODO: i think there's an extra 2x factor that shouldn't be there?
-            Float spacing = 4 * rear_radius * dr::sqrt(2.f / rays_per_segment);
-            BoundingBox2f pupil_bound(bbox_min - spacing, bbox_max + spacing);
-
+            BoundingBox2f pupil_bound = bound_exit_pupil(r0, r1);
             m_exit_pupil_bounds[segment_id] = pupil_bound;
 
             // TODO: workaround for bbox vector not working
@@ -1192,6 +1213,7 @@ public:
         m_max_bounds_ptr = dr::load<DynamicBuffer<Float>>(max_bounds.data(), max_bounds.size() * 2);
     }
 
+    // sample a point on the rear plane using the exit pupil LUT
     Point3f sample_exit_pupil(const Point3f p_film, const Point2f aperture_sample, Float& bounds_area) const {
         Float r_film = dr::sqrt(dr::sqr(p_film.x()) + dr::sqr(p_film.y()));
         UInt32 r_idx = dr::floor2int<UInt32>(r_film / m_film_diagonal * m_exit_pupil_bounds.size());
@@ -1227,11 +1249,38 @@ public:
                        m_rear_element_z);
     }
 
+    // render the exit pupil as seen from a radial position `r` on the film
+    void render_exit_pupil(Float r, Float wavelength = 589.3f, size_t num_rays = 1 << 20) {
+        Float rear_radius = m_interfaces.front()->get_radius() * 1.5f;
+        Float rear_z = m_interfaces.front()->get_z();
+        Float rays_transmitted = 0;
+
+        for (size_t i = 0; i < num_rays; ++i) {
+            Point3f p_film = Point3f(r, 0.f, 0.f);
+            Point3f p_rear(
+                dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(0, i)),
+                dr::lerp(-rear_radius, rear_radius, m_qmc_sampler->eval<Float>(1, i)),
+                rear_z);
+            Point2f p(p_rear.x(), p_rear.y());
+
+            Ray3f ray(p_film, dr::normalize(Vector3f(p_rear - p_film)), 0.0f, Wavelength(wavelength));
+            auto [ray_out, active] = trace_ray_from_film(ray);
+
+            std::cout << "POINT, " << p.x() << ", " << p.y() << ", " << active << "\n";
+            rays_transmitted += active;
+        }
+    }
+
+
+
     // sample a point on the rear plane
-    Point3f sample_rear_element(const Point3f /*p_film*/, const Point2f aperture_sample) const {
+    Point3f sample_rear_element(const Point3f /*p_film*/, const Point2f aperture_sample, Float& bounds_area) const {
 
         Point2f tmp = m_rear_element_radius * warp::square_to_uniform_disk_concentric(aperture_sample);
         Point3f p_rear(tmp.x(), tmp.y(), m_rear_element_z);
+
+        bounds_area = dr::Pi<Float> * dr::sqr(m_rear_element_radius);
+
         return p_rear;
     }
 
@@ -1618,7 +1667,9 @@ public:
         // Sample the exit pupil
         Float bounds_area(0.f);
         // std::cout << bounds_area << "\n";
-        Point3f aperture_p = sample_exit_pupil(film_p, aperture_sample, bounds_area);
+        // Point3f aperture_p = sample_exit_pupil(film_p, aperture_sample, bounds_area);
+        Point3f aperture_p = sample_rear_element(film_p, aperture_sample, bounds_area);
+
         // std::cout << bounds_area << "\n";
 
         // STAGE 3: RAY SETUP
@@ -1636,7 +1687,7 @@ public:
         // std::cout << "B: tracing pixel, " << position_sample << ", " << aperture_sample << "\n";
         auto [ray_out, active_out] = trace_ray_from_film(ray);
         // std::cout << "C\n";
-        Vector3f d_out(ray_out.d);
+        Vector3f d_out_local(ray_out.d);
         // std::cout << "D\n";
 
         // std::cout << active_out << ", " << active << ", " << wav_weight << std::endl;
@@ -1658,13 +1709,13 @@ public:
         // dr::masked(ray_out, active) = m_to_world.value() * ray_out;
         // ray_out = m_to_world.value() * ray_out;
         ray_out.o = m_to_world.value().transform_affine(ray_out.o);
-        ray_out.d = m_to_world.value() * ray_out.d;
+        ray_out.d = m_to_world.value() * d_out_local;
         // ------------------------
 
         // STAGE 4: POST-PROCESS
         // handle z-clipping
         // NOTE: the direction `d` in inv_z should be in the camera frame, i.e. before `m_to_world` is applied
-        Float inv_z = dr::rcp(d_out.z());
+        Float inv_z = dr::rcp(d_out_local.z());
         Float near_t = m_near_clip * inv_z,
               far_t  = m_far_clip * inv_z;
         ray_out.o += ray_out.d * near_t;
@@ -1675,6 +1726,18 @@ public:
         // std::cout << "Reciprocity test: " << test_trace_ray_from_world(ray) << std::endl;
 
         // std::cout << ray_out.o << ",\t" << ray_out.d << ",\t" << ray_out.maxt << std::endl;
+
+        bool simple_weight = false;
+        Float ct = d_out_local.z();
+        Float cos4t = dr::sqr(dr::sqr(ct));
+
+        if (simple_weight) {
+            wav_weight *= cos4t;
+        } else {
+            wav_weight *= ProjectiveCamera<Float,Spectrum>::shutter_open_time() * 
+                            bounds_area * dr::rcp(dr::sqr(m_rear_element_z));
+        }
+
 
         return { ray_out, wav_weight };
     }
