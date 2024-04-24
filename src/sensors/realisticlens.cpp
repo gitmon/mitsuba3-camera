@@ -324,7 +324,8 @@ class LensInterface {
                 else {
                     radius = (m_element_radius * (num_points - 1 - i)) / (num_points - 1);
                 }
-                Ray3f ray(Point3f(radius, 0.f, m_z_intercept - 1.0f), Vector3f(0.f, 0.f, 1.f));
+
+                Ray3f ray(Point3f(radius, 0.f, m_z_intercept - 1.f), Vector3f(0.f, 0.f, 1.f));
                 Interaction3f si = intersect(ray);
                 // TODO?
                 // assert(si.is_valid());
@@ -384,7 +385,7 @@ class SpheroidLens final : public LensInterface<Float, Spectrum> {
             Float near_t = center_proj - sqrt_disc;
             Float far_t = center_proj + sqrt_disc;
 
-            active = far_t >= Float(0.0);
+            active &= far_t >= Float(0.0);
             if (dr::none_or<false>(active)) {       // TODO: this is how early exit is handled in `interaction.h`
                 return si;
             }
@@ -475,7 +476,6 @@ class PlanoLens : public LensInterface<Float, Spectrum> {
         }
 
         Normal3f normal(const Point3f &p) const override {
-            // TODO: direction depends on whether ray is entering/leaving medium?
             // CONVENTION: interior is -z, exterior is +z
             return m_normal;
         }
@@ -508,50 +508,10 @@ class ApertureStop final : public PlanoLens<Float, Spectrum> {
             DispersiveMaterial<Float, Spectrum> air_material) : 
         PlanoLens<Float, Spectrum>(aperture_radius, z_intercept, air_material, air_material) { }
 
-        // Interaction3f intersect(const Ray3f &ray) const override {
-        //     Interaction3f si = dr::zeros<Interaction3f>();
-        //     si.time = ray.time;
-        //     si.wavelengths = ray.wavelengths;
-
-        //     // no-intersection case: ray.d is perpendicular to m_normal
-        //     Float n_dot_d = dr::dot(m_normal, ray.d);
-        //     Mask active = dr::abs(n_dot_d) >= dr::Epsilon<Float>;
-        //     if (dr::none_or<false>(active)) {
-        //         return si;
-        //     }
-
-        //     Float t = (m_param - dr::dot(m_normal, ray.o)) / n_dot_d;
-        //     active = t >= Float(0.0);
-        //     if (dr::none_or<false>(active)) {
-        //         return si;
-        //     }
-
-        //     Point3f p_surface = ray(t);
-        //     si.t = t;
-        //     si.p = p_surface;
-        //     si.n = normal(p_surface);
-
-        //     return si;
-        // }
-
-        // Normal3f normal(const Point3f &p) const override {
-        //     // TODO: direction depends on whether ray is entering/leaving medium?
-        //     // CONVENTION: interior is -z, exterior is +z
-        //     return m_normal;
-        // }
-
-        // void offset_along_axis(Float delta) override {
-        //     LensInterface<Float, Spectrum>::m_z_intercept += delta;
-        //     m_param = m_normal.z() * LensInterface<Float, Spectrum>::m_z_intercept;
-        // }
-
         // implements a "no-op" for compute_interaction: if the ray is valid, it simply passes through
         // the aperture stop with its direction unchanged
         std::tuple<Ray3f, Mask> compute_interaction(const Ray3f &ray) const override {
             Interaction3f si = this->intersect(ray);
-            
-            // if no intersection, early termination
-            // if (!intersected) { return false; }
             Mask active = si.is_valid();
 
             // reject intersection if it lies outside the stop radius
@@ -561,7 +521,6 @@ class ApertureStop final : public PlanoLens<Float, Spectrum> {
             // create a new ray in the same direction; no refraction
             Ray3f next_ray = dr::zeros<Ray3f>();
             dr::masked(next_ray, active) = Ray3f(si.p, ray.d, dr::Largest<Float>, si.time, si.wavelengths);
-
             return { next_ray, active };
         }
 
@@ -601,6 +560,170 @@ class ApertureStop final : public PlanoLens<Float, Spectrum> {
 
 
 template <typename Float, typename Spectrum>
+class AsphericalLens final : public LensInterface<Float, Spectrum> {
+    public:
+        MI_IMPORT_TYPES()
+        AsphericalLens(Float curvature_radius, Float kappa, Float element_radius, Float z0, std::vector<Float> ai,
+        DispersiveMaterial<Float, Spectrum> left_material, DispersiveMaterial<Float, Spectrum> right_material) : 
+        LensInterface<Float, Spectrum>(element_radius, z0, left_material, right_material), 
+        m_K(kappa), m_ai(ai) { 
+            m_c = dr::rcp(curvature_radius);
+        }
+
+        Interaction3f intersect(const Ray3f &ray) const override {
+            Float TOL = dr::Epsilon<Float> * 10.f;
+
+            Interaction3f si = dr::zeros<Interaction3f>();
+            si.time = ray.time;
+            si.wavelengths = ray.wavelengths;
+
+            auto [t, valid] = intersect_conic(ray);
+
+            // LOGGING
+            std::cout << t << ", " << valid << "\n";
+
+            if (dr::none_or<false>(valid)) {
+                std::cout << "A\n";
+                return si;
+            }
+
+            Point3f p_curr = ray(t);
+            Float  r2_curr = dr::sqr(p_curr.x()) + dr::sqr(p_curr.y());
+            Float err = dr::Infinity<Float>;
+            UInt32 itr = 0;
+
+            Mask active = true;
+            dr::Loop<Mask> loop("trace", t, active, p_curr, r2_curr, err, itr);
+
+            // compute asphere intersection using newton's method
+            while(loop(active)) {
+                // build tangent plane on the asphere
+                Point3f plane_p(p_curr.x(), p_curr.y(), eval_asph(r2_curr));
+                err = dr::abs(p_curr.z() - plane_p.z());
+
+                Float z_grad = eval_asph_grad(r2_curr);
+                Vector2f radial(p_curr.x(), p_curr.y());
+                Float norm_sq = dr::squared_norm(radial);
+                radial = dr::select(norm_sq >= 4.f * dr::Epsilon<Float>, 
+                                    radial * dr::rsqrt(norm_sq), Vector2f(0.0f));
+                Normal3f plane_n(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
+
+                // intersect ray with tangent plane
+                t = dr::dot(plane_n, plane_p - ray.o) / dr::dot(plane_n, ray.d);
+                p_curr = ray(t);
+                r2_curr = dr::sqr(p_curr.x()) + dr::sqr(p_curr.y());
+
+                itr++;
+                active &= (err > TOL) && (itr < 10);
+            }
+
+            // LOGGING
+            std::cout << "Newton result: err = " << err << ", itr = " << itr << "\n";
+            std::cout << "TOL = " << TOL << "\n";
+
+            // check whether newton converged
+            active = err < TOL;
+
+            // TODO: if newton fails, exit? or retry with bisection?
+            if (dr::none_or<false>(active)) {
+                std::cout << "B\n";
+                return si;
+            }
+
+            Point3f p_surface = ray(t);
+            si.t = t;
+            si.p = p_surface;
+            si.n = normal(p_surface);
+
+            // LOGGING
+            std::cout << "C\n";
+
+            return si;
+        }
+
+        Normal3f normal(const Point3f &p) const override {
+            Vector2f radial(p.x(), p.y());
+            Float r2 = dr::squared_norm(radial);
+            radial = dr::select(r2 >= 4.f * dr::Epsilon<Float>, 
+                                radial * dr::rsqrt(r2), Vector2f(0.0f));
+            Float z_grad = eval_asph_grad(r2);
+            Normal3f normal(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
+            return normal;
+        }
+
+        void offset_along_axis(Float delta) override {
+            LensInterface<Float, Spectrum>::m_z_intercept += delta;
+        }
+
+        std::string to_string() const override {
+            using string::indent;
+            std::ostringstream oss;
+
+            oss << "AsphericalLens[" << std::endl
+                << "  z_intercept = " << LensInterface<Float, Spectrum>::m_z_intercept << "," << std::endl
+                << "  curvature = " << m_c << "," << std::endl
+                << "  kappa = " << m_K << "," << std::endl
+                << "]";
+            return oss.str();
+        }
+    private:
+        Float m_c;
+        Float m_K;
+        std::vector<Float> m_ai;    // TODO: switch to fixed-size array?
+
+        inline Float eval_conic(Float r2) const {
+            Float sqr_term = 1.f - (1.f + m_K) * dr::sqr(m_c) * r2;
+            Float z = m_c * r2 * dr::rcp(1.f + dr::sqrt(sqr_term));
+            return z;
+        }
+
+        inline Float eval_conic_grad(Float r) const {
+            Float cr = m_c * r;
+            Float sqr_term = 1.f - (1.f + m_K) * dr::sqr(cr);
+            Float z = cr * dr::rsqrt(sqr_term);
+            return z; 
+        }
+
+        // Evaluate the asphere polynomial using Horner's method
+        Float eval_asph(Float r2) const {
+            Float z = 0.f;
+            for (int i = m_ai.size() - 1; i >= 0; --i) {
+                z = dr::fmadd(z, r2, m_ai.at(i));
+            }
+            z *= dr::sqr(r2);
+            z += eval_conic(r2);
+            return -z + LensInterface<Float, Spectrum>::m_z_intercept;
+        }
+
+        Float eval_asph_grad(Float r2) const {
+            Float r = dr::sqrt(r2);
+            Float z = 0.f;
+            for (int i = m_ai.size() - 1; i >= 0; --i) {
+                z = dr::fmadd(z, r2, (2.f * i + 4.f) * m_ai.at(i));
+            }
+            z *= r2 * r;
+            z += eval_conic_grad(r);
+            return z;
+        }
+
+        std::tuple<Float, Mask> intersect_conic(const Ray3f& ray) const {
+            Vector3f o = ray.o - Vector3f(0.f, 0.f, LensInterface<Float, Spectrum>::m_z_intercept),
+                     d = ray.d;
+            
+            Float A = m_c * (1.f + m_K * dr::sqr(d.z())),
+                  B = 2.f * (m_c * (dr::dot(o, d) +  m_K * o.z() * d.z()) - d.z()),
+                  C = m_c * (dr::squared_norm(o) + m_K * dr::sqr(o.z())) - 2.f * o.z();
+            
+            auto [valid, t0, t1] = math::solve_quadratic(A, B, C);
+
+            return { dr::select(t0 > 0.f, t0, t1), valid };
+        }
+};
+
+
+
+
+template <typename Float, typename Spectrum>
 class RealisticLensCamera final : public ProjectiveCamera<Float, Spectrum> {
 public:
     MI_IMPORT_BASE(ProjectiveCamera, m_to_world, m_needs_sample_3, m_film, m_sampler,
@@ -613,12 +736,12 @@ public:
         m_x_fov = (ScalarFloat) parse_fov(props, size.x() / (double) size.y());
 
 
-        m_aperture_radius = props.get<ScalarFloat>("aperture_radius");
+        // m_aperture_radius = props.get<ScalarFloat>("aperture_radius");
 
-        if (dr::all(dr::eq(m_aperture_radius, 0.f))) {
-            Log(Warn, "Can't have a zero aperture radius -- setting to %f", dr::Epsilon<Float>);
-            m_aperture_radius = dr::Epsilon<Float>;
-        }
+        // if (dr::all(dr::eq(m_aperture_radius, 0.f))) {
+        //     Log(Warn, "Can't have a zero aperture radius -- setting to %f", dr::Epsilon<Float>);
+        //     m_aperture_radius = dr::Epsilon<Float>;
+        // }
 
         if (m_to_world.scalar().has_scale())
             Throw("Scale factors in the camera-to-world transformation are not allowed!");
@@ -646,6 +769,8 @@ public:
             build_flipped_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
         } else if (lens_type == "tessar") {
             build_tessar_lens(object_distance);
+        } else if (lens_type == "asph") {
+            build_asph_lens(object_distance);
         } else {
             build_thin_lens(object_distance, focal_length, lens_diameter / 2);
         }
@@ -660,13 +785,10 @@ public:
         // Float lens_diameter = 0.02f;
         // build_plano_lens(Float(0.02f), Float(0.01f), lens_diameter / 2, lens_diameter / 10);
 
+        // XXX
         // std::cout << "Computing exit pupil LUT...\n";
         // compute_exit_pupil_bounds();
         // std::cout << "LUT complete!\n";
-        // // loop_v1();
-        // // loop_v2();
-        // std::cout << "Running loop_v3() ...\n";
-        // loop_v3();
 
         if (TEST_EXIT_PUPIL) {
             Float r_pupil = props.get<Float>("pupil_render_pos", 0.f);
@@ -676,6 +798,13 @@ public:
                                 << pupil_bound.max.x() << ", " << pupil_bound.max.y() << "\n";
             render_exit_pupil(r_pupil, wv, 1 << 20);
         }
+
+
+        // Interaction3f it(0.f, 0.f, Wavelength(0.f), Point3f(0.321f, -0.321f, 1.f), Normal3f(0.f, 0.f, 1.f));
+        // Point2f sample(0.46f, 0.52f);
+        // Mask active = true;
+        // auto [ds, importance] = sample_direction(it, sample, active);
+        // std::cout << "Sample: " << ds.uv << ", importance: " << importance << "\n";
     }
 
     void loop_v1(float xmin = 0.0f, float xmax = 0.005f, size_t N = 6) const {
@@ -1015,6 +1144,190 @@ public:
 
 
 
+    void build_asph_lens(Float object_distance) {
+        // Parameters from:
+        // https://patents.google.com/patent/US8934179B2/en
+
+        DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> NLAK9 = 
+            DispersiveMaterial<Float, Spectrum>("NLAK9", 
+            Vector3f(1.462319050, 0.344399589, 1.155083720), 
+            Vector3f(0.007242702, 0.0243353131, 85.46868680));
+
+        // for (int i = 0; i < Ai.size(); ++i) {
+        //     Ai[i] *= 0.001f;
+        // }
+        // m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(-0.001f * c_rad, 0.001f * K, 0.001f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        Float z_pos = 0.0f;
+        Float t;
+
+        Float c, K, elem_diameter;
+        std::vector<Float> Ai;
+        auto mat1 = air, mat2 = air;
+
+        // surface12
+        t = 0.607f;
+        z_pos += t;
+
+        elem_diameter = 5.341090909f;
+        mat1 = air;
+        mat2 = NLAK9;
+
+        m_interfaces.push_back(new PlanoLens<Float, Spectrum>(0.5f * elem_diameter, z_pos, mat1, mat2));
+
+        // surface11
+        t = 0.3f;
+        z_pos += t;
+
+        elem_diameter = 5.341090909f;
+        mat1 = NLAK9;
+        mat2 = air;
+
+        m_interfaces.push_back(new PlanoLens<Float, Spectrum>(0.5f * elem_diameter, z_pos, mat1, mat2));
+
+        // surface10
+        t = 0.3f;
+        z_pos += t;
+
+        c = 0.749625187f;
+        K = -4.858f;
+        Ai = { -9.165E-02, 4.113E-02, -1.389E-02, 2.647E-03, -2.445E-04, 3.564E-06, 6.120E-07 };
+        elem_diameter = 4.747636364;
+        mat1 = air;
+        mat2 = NLAK9;
+
+        // c *= -1.f;
+        // for (int i = 0; i < Ai.size(); ++i) Ai[i] = -Ai[i];
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface9
+        t = 0.8f;
+        z_pos += t;
+
+        c = 0.416319734f;
+        K = -1.855E+01;
+        Ai = { -1.503E-01, 4.478E-02, -7.829E-03, -1.119E-03, 2.461E-04, 0.000E+00, 0.000E+00 };
+        elem_diameter = 3.684363636;
+        mat1 = NLAK9;
+        mat2 = air;
+
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface8
+        t = 0.573f;
+        z_pos += t;
+
+        c = 0.045917899f;
+        K = -3.345E+04;
+        Ai = { -3.596E-02, 9.066E-02, -1.026E-01,  4.108E-02, -5.778E-03, -5.187E-05, -6.175E-06 };
+        elem_diameter = 3.115636364;
+        mat1 = air;
+        mat2 = NLAK9;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface7
+        t = 0.605f;
+        z_pos += t;
+
+        c = 0.287438919f;
+        K = -3.702E+01;
+        Ai = { 5.323E-02, -7.412E-02, -1.800E-02,  1.682E-02,  4.538E-03, -2.738E-03, -1.886E-05 };
+        elem_diameter = 2.893090909;
+        mat1 = NLAK9;
+        mat2 = air;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface6
+        t = 0.187f;
+        z_pos += t;
+
+        c = 0.100290843f;
+        K = 3.438E+00;
+        Ai = { -1.142E-01, -2.103E-02,  7.808E-03,  2.283E-02,  5.590E-05, -1.053E-03, -1.525E-04 };
+        elem_diameter = 2.423272727;
+        mat1 = air;
+        mat2 = NLAK9;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface5
+        t = 0.516f;
+        z_pos += t;
+
+        c = 0.020134093f;
+        K = 0.000E+00;
+        Ai = { -1.060E-01,  5.779E-02,  1.251E-03, -3.017E-02,  6.065E-02, -1.536E-02, -2.048E-03 };
+        elem_diameter = 2.423272727;
+        mat1 = NLAK9;
+        mat2 = air;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface4
+        t = 0.35f;
+        z_pos += t;
+
+        c = 0.473709143f;
+        K = -2.723E-01;
+        Ai = { -8.944E-02,  2.532E-01, -3.068E-01,  2.175E-01, -5.539E-02,  3.281E-03, -6.552E-07 };
+        elem_diameter = 2.052363636;
+        mat1 = air;
+        mat2 = NLAK9;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface3
+        t = 0.27f;
+        z_pos += t;
+
+        c = 0.055020633;
+        K = 0.000E+00;
+        Ai = { 4.814E-02,  6.037E-02, -1.838E-01,  1.217E-01, -1.665E-02, -5.234E-04,  2.394E-04 };
+        elem_diameter = 2.052363636;
+        mat1 = NLAK9;
+        mat2 = air;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface2
+        t = 0.025f;
+        z_pos += t;
+
+        c = -0.190150219;
+        K = -1.818E+00;
+        Ai = { 1.288E-01, -1.343E-01,  1.978E-02,  3.399E-04, -6.173E-04, -5.735E-04,  8.520E-12 };
+        elem_diameter = 2.052363636;
+        mat1 = air;
+        mat2 = NLAK9;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+        // surface1
+        t = 0.655f;
+        z_pos += t;
+
+        c = 0.570125428;
+        K = -1.898E+00;
+        Ai = { 3.822E-02, -2.809E-02,  4.970E-02, -5.149E-02,  4.628E-03,  4.215E-03, -3.450E-03 };
+        elem_diameter = 2.052363636;
+        mat1 = NLAK9;
+        mat2 = air;
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+
+
+
+
+        draw_cross_section(16);
+
+        // Float delta = focus_thick_lens(object_distance);
+        // for (const auto &interface : m_interfaces) {
+        //     interface->offset_along_axis(-delta);
+        // }
+
+        // std::cout << "Fine focus adjustment: " << delta << std::endl;
+
+        m_rear_element_z = m_interfaces.front()->get_z();
+        m_rear_element_radius = m_interfaces.front()->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+    }
+
+
     std::tuple<Ray3f, Mask> trace_ray_from_film(const Ray3f &ray) const {
         Mask active = true;
         Ray3f curr_ray(ray);
@@ -1169,10 +1482,8 @@ public:
     }
 
     void compute_exit_pupil_bounds() {
-        // NOTE: this only evaluates the exit pupil shape for a fixed wavelength! 
-        // the resulting approximate sample area may or may not work for all other
-        // wavelengths in the spectrum
-        // TODO: handle wavelength dimension
+        // differences from PBRT: we evaluate the exit pupil shape for the full
+        // spectrum of visible wavelengths
         size_t num_segments = 64;
         m_exit_pupil_bounds.resize(num_segments);
 
@@ -1270,8 +1581,6 @@ public:
             rays_transmitted += active;
         }
     }
-
-
 
     // sample a point on the rear plane
     Point3f sample_rear_element(const Point3f /*p_film*/, const Point2f aperture_sample, Float& bounds_area) const {
@@ -1588,7 +1897,7 @@ public:
 
     void traverse(TraversalCallback *callback) override {
         Base::traverse(callback);
-        callback->put_parameter("aperture_radius", m_aperture_radius, +ParamFlags::NonDifferentiable);
+        // callback->put_parameter("aperture_radius", m_aperture_radius, +ParamFlags::NonDifferentiable);
         callback->put_parameter("focus_distance",  m_focus_distance,  +ParamFlags::NonDifferentiable);
         callback->put_parameter("x_fov",           m_x_fov,           +ParamFlags::NonDifferentiable);
         callback->put_parameter("to_world",       *m_to_world.ptr(),  +ParamFlags::NonDifferentiable);
@@ -1613,29 +1922,32 @@ public:
 
         // TODO: deprecate the following
 
-        m_camera_to_sample = perspective_projection(
-            m_film->size(), m_film->crop_size(), m_film->crop_offset(),
-            m_x_fov, Float(m_near_clip), Float(m_far_clip));
+        // m_camera_to_sample = perspective_projection(
+        //     m_film->size(), m_film->crop_size(), m_film->crop_offset(),
+        //     m_x_fov, Float(m_near_clip), Float(m_far_clip));
 
-        m_sample_to_camera = m_camera_to_sample.inverse();
+        // m_sample_to_camera = m_camera_to_sample.inverse();
 
-        // Position differentials on the near plane
-        m_dx = m_sample_to_camera * Point3f(1.f / m_resolution.x(), 0.f, 0.f)
-             - m_sample_to_camera * Point3f(0.f);
-        m_dy = m_sample_to_camera * Point3f(0.f, 1.f / m_resolution.y(), 0.f)
-             - m_sample_to_camera * Point3f(0.f);
+        // // Position differentials on the near plane
+        // m_dx = m_sample_to_camera * Point3f(1.f / m_resolution.x(), 0.f, 0.f)
+        //      - m_sample_to_camera * Point3f(0.f);
+        // m_dy = m_sample_to_camera * Point3f(0.f, 1.f / m_resolution.y(), 0.f)
+        //      - m_sample_to_camera * Point3f(0.f);
 
         /* Precompute some data for importance(). Please
            look at that function for further details. */
-        Point3f pmin(m_sample_to_camera * Point3f(0.f, 0.f, 0.f)),
-                pmax(m_sample_to_camera * Point3f(1.f, 1.f, 0.f));
+        Point3f pmin(m_sample_to_film * Point3f(0.f, 0.f, 0.f)),
+                pmax(m_sample_to_film * Point3f(1.f, 1.f, 0.f));
 
         m_image_rect.reset();
-        m_image_rect.expand(Point2f(pmin.x(), pmin.y()) / pmin.z());
-        m_image_rect.expand(Point2f(pmax.x(), pmax.y()) / pmax.z());
+        // m_image_rect.expand(Point2f(pmin.x(), pmin.y()) / pmin.z());
+        // m_image_rect.expand(Point2f(pmax.x(), pmax.y()) / pmax.z());
+        m_image_rect.expand(Point2f(pmin.x(), pmin.y()));
+        m_image_rect.expand(Point2f(pmax.x(), pmax.y()));
         m_normalization = 1.f / m_image_rect.volume();
 
-        dr::make_opaque(m_camera_to_sample, m_sample_to_camera, m_dx, m_dy,
+        dr::make_opaque(m_film_to_sample, m_sample_to_film, 
+                        // m_dx, m_dy, 
                         m_x_fov, m_image_rect, m_normalization);
     }
 
@@ -1667,6 +1979,7 @@ public:
         // Sample the exit pupil
         Float bounds_area(0.f);
         // std::cout << bounds_area << "\n";
+        // XXX
         // Point3f aperture_p = sample_exit_pupil(film_p, aperture_sample, bounds_area);
         Point3f aperture_p = sample_rear_element(film_p, aperture_sample, bounds_area);
 
@@ -1727,17 +2040,17 @@ public:
 
         // std::cout << ray_out.o << ",\t" << ray_out.d << ",\t" << ray_out.maxt << std::endl;
 
-        bool simple_weight = false;
-        Float ct = d_out_local.z();
-        Float cos4t = dr::sqr(dr::sqr(ct));
+        // TODO: reactivate when sample_direction() is modified to account for the radiometry weight
+        // bool simple_weight = true;
+        // Float ct = d_out_local.z();
+        // Float cos4t = dr::sqr(dr::sqr(ct));
 
-        if (simple_weight) {
-            wav_weight *= cos4t;
-        } else {
-            wav_weight *= ProjectiveCamera<Float,Spectrum>::shutter_open_time() * 
-                            bounds_area * dr::rcp(dr::sqr(m_rear_element_z));
-        }
-
+        // if (simple_weight) {
+        //     wav_weight *= cos4t;
+        // } else {
+        //     wav_weight *= ProjectiveCamera<Float,Spectrum>::shutter_open_time() * 
+        //                     bounds_area * dr::rcp(dr::sqr(m_rear_element_z));
+        // }
 
         return { ray_out, wav_weight };
     }
@@ -1810,46 +2123,91 @@ public:
         Transform4f trafo = m_to_world.value();
         Point3f ref_p = trafo.inverse().transform_affine(it.p);
 
-        // Check if it is outside of the clip range (no change)
+        // std::cout << "a\n";
+
+        // Check if `it.p` is outside of the clip range (no change)
         DirectionSample3f ds = dr::zeros<DirectionSample3f>();
         ds.pdf = 0.f;
         active &= (ref_p.z() >= m_near_clip) && (ref_p.z() <= m_far_clip);
         if (dr::none_or<false>(active))
             return { ds, dr::zeros<Spectrum>() };
 
+
+        // std::cout << "b\n";
+
         // Sample a position on the aperture (in local coordinates)
-        // TODO: I guess this changes into sampling the rear plane?
-        Point2f tmp = warp::square_to_uniform_disk_concentric(sample) * m_aperture_radius;
-        Point3f aperture_p(tmp.x(), tmp.y(), 0);
+        // here, we define the aperture as a circular region on the "front plane": the
+        // plane tangent to the outermost element surface, closest to the world.
+        // we then sample a point on this circular region. A factor of 1.5x is added
+        // to the circle radius to account for rays that might enter at oblique angles.
+        Float front_radius = 1.0f * m_interfaces.back()->get_radius();
+        Float front_z = m_interfaces.back()->get_z();
+        Point2f tmp = warp::square_to_uniform_disk_concentric(sample) * front_radius;
+        Point3f aperture_p(tmp.x(), tmp.y(), front_z);
 
         // Compute the normalized direction vector from the aperture position to the referent point
-        // TODO: 
-        Vector3f local_d = ref_p - aperture_p;
-        Float dist     = dr::norm(local_d);
-        Float inv_dist = dr::rcp(dist);
-        local_d *= inv_dist;
+        // (no change)
+        Vector3f dir_ap2ref = ref_p - aperture_p;
+        Float dist_ref = dr::norm(dir_ap2ref);
+        Float inv_dist_ref = dr::rcp(dist_ref);
+        dir_ap2ref *= inv_dist_ref;
+
+        // Compute the corresponding point on the film (expressed in UV coordinates)
+        // In our case, we trace a ray backwards from the front, world-facing lens element to the rear
+        // TODO: account for effect of dispersion on ray path
+
+        // Point3f scr = m_camera_to_sample.transform_affine(
+        //     aperture_p + local_d * (m_focus_distance * inv_ct));
+        Ray3f world_ray(ref_p, -dir_ap2ref, 0.0f, Wavelength(589.3f));
+
+        // std::cout << world_ray << "\n";
+
+        auto [ray_out, valid] = trace_ray_from_world(world_ray);
+
+        // std::cout << "c\n";
+
+        // if ray doesn't reach the rear of the lens, exit
+        if (dr::none_or<false>(valid)) {
+            return { ds, dr::zeros<Spectrum>() };
+        }
+
+        Point3f scr = m_film_to_sample.transform_affine(
+            ray_out(-ray_out.o.z() / ray_out.d.z())
+        );
+
+        // std::cout << "Point: " << scr << "\n";
 
         // Compute importance value
-        Float ct     = Frame3f::cos_theta(local_d),
-              inv_ct = dr::rcp(ct);
-        Point3f scr = m_camera_to_sample.transform_affine(
-            aperture_p + local_d * (m_focus_distance * inv_ct));
-        Mask valid = dr::all(scr >= 0.f) && dr::all(scr <= 1.f);
-        Float value = dr::select(valid, m_normalization * inv_ct * inv_ct * inv_ct, 0.f);
+        // Mask valid = dr::all(scr >= 0.f) && dr::all(scr <= 1.f);
+        valid &= dr::all(dr::head<2>(scr) >= 0.f) && dr::all(dr::head<2>(scr) <= 1.f);
+        // Float ct     = Frame3f::cos_theta(local_d),
+        Float ct_film = Frame3f::cos_theta(-ray_out.d),
+              inv_ct  = dr::rcp(ct_film);
+        // TODO: need to account for cos4 weight?
+        Float value = dr::select(valid, m_normalization * dr::sqr(dr::sqr(inv_ct)) * dr::sqr(m_rear_element_z), 0.f);   // TODO: correct?? d^2?
 
         if (dr::none_or<false>(valid))
             return { ds, dr::zeros<Spectrum>() };
 
-        ds.uv   = dr::head<2>(scr) * m_resolution;
-        ds.p    = trafo.transform_affine(aperture_p);
-        ds.d    = (ds.p - it.p) * inv_dist;
-        ds.dist = dist;
-        ds.n    = trafo * Vector3f(0.f, 0.f, 1.f);
+        // std::cout << "d\n";
 
-        Float aperture_pdf = dr::rcp(dr::Pi<Float> * dr::sqr(m_aperture_radius));
-        ds.pdf = dr::select(valid, aperture_pdf * dist * dist * inv_ct, 0.f);
+        // Populate DirectionSample
+        ds.uv   = dr::head<2>(scr) * m_resolution;      // OK
+        ds.p    = trafo.transform_affine(aperture_p);   // OK
+        ds.d    = (ds.p - it.p) * inv_dist_ref;             // OK
+        ds.dist = dist_ref;                                 // OK
+        ds.n    = trafo * Vector3f(0.f, 0.f, 1.f);      // TODO: not sure, OK i think? (normal of the front plane)
 
-        return { ds, Spectrum(value * inv_dist * inv_dist) };
+        // compute sample PDF
+        // Float aperture_pdf = dr::rcp(dr::Pi<Float> * dr::sqr(m_aperture_radius));
+        Float aperture_pdf = dr::rcp(dr::Pi<Float> * dr::sqr(front_radius));
+
+        Float ct_ref = Frame3f::cos_theta(dir_ap2ref);
+        ds.pdf = dr::select(valid, aperture_pdf * dist_ref * dist_ref * dr::rcp(ct_ref), 0.f);     // convert pdf(ap<->ref) to solid angle (correct)
+        // ds.pdf = dr::select(valid, aperture_pdf * dr::sqr(m_rear_element_z) * dr::rcp(ct_film), 0.f);   // wrong one
+
+        return { ds, Spectrum(value * inv_dist_ref * inv_dist_ref * ct_ref) };   // TODO: sample *ref* geometry term, so include ct_ref
+        // return { ds, Spectrum(value * dr::rcp(inv_ct * dr::sqr(m_rear_element_z))) };   // wrong one
     }
 
     // no change
@@ -1881,18 +2239,18 @@ public:
 private:
     Transform4f m_film_to_sample;
     Transform4f m_sample_to_film;
-    Transform4f m_camera_to_sample;
-    Transform4f m_sample_to_camera;
+    // Transform4f m_camera_to_sample;
+    // Transform4f m_sample_to_camera;
     BoundingBox2f m_image_rect;
     std::vector<BoundingBox2f> m_exit_pupil_bounds;
     // DynamicBuffer<Float> m_exit_pupil_bounds_ptr;
     DynamicBuffer<Float> m_min_bounds_ptr;
     DynamicBuffer<Float> m_max_bounds_ptr;
     Float m_film_diagonal;
-    Float m_aperture_radius;
+    // Float m_aperture_radius;
     Float m_normalization;
     Float m_x_fov;
-    Vector3f m_dx, m_dy;
+    // Vector3f m_dx, m_dy;
     // std::vector<std::unique_ptr<LensInterface<Float, Spectrum>>> m_interfaces;
     // TODO: replace pointer -> ref
     std::vector<LensInterface<Float, Spectrum>*> m_interfaces;
