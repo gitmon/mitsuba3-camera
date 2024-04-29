@@ -354,9 +354,9 @@ template <typename Float, typename Spectrum>
 class SpheroidLens final : public LensInterface<Float, Spectrum> {
     public:
         MI_IMPORT_TYPES()
-        SpheroidLens(Float curvature_radius, Float aperture_radius, Float z_intercept, 
+        SpheroidLens(Float curvature_radius, Float element_radius, Float z_intercept, 
         DispersiveMaterial<Float, Spectrum> left_material, DispersiveMaterial<Float, Spectrum> right_material) : 
-        LensInterface<Float, Spectrum>(aperture_radius, z_intercept, left_material, right_material), m_curvature_radius(curvature_radius) {
+        LensInterface<Float, Spectrum>(element_radius, z_intercept, left_material, right_material), m_curvature_radius(curvature_radius) {
             m_center = Point3f(0.0, 0.0, LensInterface<Float, Spectrum>::m_z_intercept + m_curvature_radius);
 
             // sign convention: convex = positive radius, concave = negative
@@ -436,15 +436,15 @@ template <typename Float, typename Spectrum>
 class PlanoLens : public LensInterface<Float, Spectrum> {
     public:
         MI_IMPORT_TYPES()
-        PlanoLens(Normal3f normal, Float aperture_radius, Float z_intercept, 
+        PlanoLens(Normal3f normal, Float element_radius, Float z_intercept, 
         DispersiveMaterial<Float, Spectrum> left_material, DispersiveMaterial<Float, Spectrum> right_material) : 
-        LensInterface<Float, Spectrum>(aperture_radius, z_intercept, left_material, right_material), m_normal(normal) {
+        LensInterface<Float, Spectrum>(element_radius, z_intercept, left_material, right_material), m_normal(normal) {
             m_param = m_normal.z() * LensInterface<Float, Spectrum>::m_z_intercept;
         }
 
-        PlanoLens(Float aperture_radius, Float z_intercept, 
+        PlanoLens(Float element_radius, Float z_intercept, 
         DispersiveMaterial<Float, Spectrum> left_material, DispersiveMaterial<Float, Spectrum> right_material) : 
-        LensInterface<Float, Spectrum>(aperture_radius, z_intercept, left_material, right_material) {
+        LensInterface<Float, Spectrum>(element_radius, z_intercept, left_material, right_material) {
             m_normal = Normal3f(0.f, 0.f, -1.0f);
             m_param = m_normal.z() * LensInterface<Float, Spectrum>::m_z_intercept;
         }
@@ -563,12 +563,10 @@ template <typename Float, typename Spectrum>
 class AsphericalLens final : public LensInterface<Float, Spectrum> {
     public:
         MI_IMPORT_TYPES()
-        AsphericalLens(Float curvature_radius, Float kappa, Float element_radius, Float z0, std::vector<Float> ai,
+        AsphericalLens(Float curvature, Float kappa, Float element_radius, Float z0, std::vector<Float> ai,
         DispersiveMaterial<Float, Spectrum> left_material, DispersiveMaterial<Float, Spectrum> right_material) : 
         LensInterface<Float, Spectrum>(element_radius, z0, left_material, right_material), 
-        m_K(kappa), m_ai(ai) { 
-            m_c = dr::rcp(curvature_radius);
-        }
+        m_c(curvature), m_K(kappa), m_ai(ai) { }
 
         Interaction3f intersect(const Ray3f &ray) const override {
             Float TOL = dr::Epsilon<Float> * 10.f;
@@ -579,11 +577,11 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
 
             auto [t, valid] = intersect_conic(ray);
 
-            // LOGGING
-            std::cout << t << ", " << valid << "\n";
+            // // LOGGING
+            // std::cout << t << ", " << valid << "\n";
 
             if (dr::none_or<false>(valid)) {
-                std::cout << "A\n";
+                // std::cout << "A\n";
                 return si;
             }
 
@@ -617,16 +615,16 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
                 active &= (err > TOL) && (itr < 10);
             }
 
-            // LOGGING
-            std::cout << "Newton result: err = " << err << ", itr = " << itr << "\n";
-            std::cout << "TOL = " << TOL << "\n";
+            // // LOGGING
+            // std::cout << "Newton result: err = " << err << ", itr = " << itr << "\n";
+            // std::cout << "TOL = " << TOL << "\n";
 
             // check whether newton converged
             active = err < TOL;
 
             // TODO: if newton fails, exit? or retry with bisection?
             if (dr::none_or<false>(active)) {
-                std::cout << "B\n";
+                // std::cout << "B\n";
                 return si;
             }
 
@@ -635,8 +633,8 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             si.p = p_surface;
             si.n = normal(p_surface);
 
-            // LOGGING
-            std::cout << "C\n";
+            // // LOGGING
+            // std::cout << "C\n";
 
             return si;
         }
@@ -1078,10 +1076,10 @@ public:
             Vector3f(0.009959061, 0.0546931752, 119.24834600));
 
         // -
-        // 0. convert mm -> m
+        // 0. convert mm -> m                   // TODO: remove this requirement
         // 1. reverse order of elements
         // 2. start summing thickness from 0
-        // 3. flip sign of radii
+        // 3. flip sign of radii                // TODO: remove this requirement
         // 4. radius = diameter / 2
         // 5. auto-fill materials
 
@@ -1147,17 +1145,13 @@ public:
     void build_asph_lens(Float object_distance) {
         // Parameters from:
         // https://patents.google.com/patent/US8934179B2/en
+        // TODO: input materials
 
         DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
         DispersiveMaterial<Float, Spectrum> NLAK9 = 
             DispersiveMaterial<Float, Spectrum>("NLAK9", 
             Vector3f(1.462319050, 0.344399589, 1.155083720), 
             Vector3f(0.007242702, 0.0243353131, 85.46868680));
-
-        // for (int i = 0; i < Ai.size(); ++i) {
-        //     Ai[i] *= 0.001f;
-        // }
-        // m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(-0.001f * c_rad, 0.001f * K, 0.001f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         Float z_pos = 0.0f;
         Float t;
@@ -1197,9 +1191,7 @@ public:
         mat1 = air;
         mat2 = NLAK9;
 
-        // c *= -1.f;
-        // for (int i = 0; i < Ai.size(); ++i) Ai[i] = -Ai[i];
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface9
         t = 0.8f;
@@ -1212,7 +1204,7 @@ public:
         mat1 = NLAK9;
         mat2 = air;
 
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface8
         t = 0.573f;
@@ -1224,7 +1216,7 @@ public:
         elem_diameter = 3.115636364;
         mat1 = air;
         mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface7
         t = 0.605f;
@@ -1236,7 +1228,7 @@ public:
         elem_diameter = 2.893090909;
         mat1 = NLAK9;
         mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface6
         t = 0.187f;
@@ -1248,7 +1240,7 @@ public:
         elem_diameter = 2.423272727;
         mat1 = air;
         mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface5
         t = 0.516f;
@@ -1260,7 +1252,7 @@ public:
         elem_diameter = 2.423272727;
         mat1 = NLAK9;
         mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface4
         t = 0.35f;
@@ -1272,7 +1264,7 @@ public:
         elem_diameter = 2.052363636;
         mat1 = air;
         mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface3
         t = 0.27f;
@@ -1284,7 +1276,7 @@ public:
         elem_diameter = 2.052363636;
         mat1 = NLAK9;
         mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface2
         t = 0.025f;
@@ -1296,7 +1288,7 @@ public:
         elem_diameter = 2.052363636;
         mat1 = air;
         mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
         // surface1
         t = 0.655f;
@@ -1308,7 +1300,7 @@ public:
         elem_diameter = 2.052363636;
         mat1 = NLAK9;
         mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(1.f / c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
+        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * elem_diameter, z_pos, Ai, mat1, mat2));
 
 
 
@@ -2185,6 +2177,7 @@ public:
               inv_ct  = dr::rcp(ct_film);
         // TODO: need to account for cos4 weight?
         Float value = dr::select(valid, m_normalization * dr::sqr(dr::sqr(inv_ct)) * dr::sqr(m_rear_element_z), 0.f);   // TODO: correct?? d^2?
+        // Float value = dr::select(valid, m_normalization / dr::sqr(dr::sqr(Frame3f::cos_theta(dir_ap2ref))) * dr::sqr(m_rear_element_z), 0.f);   // TODO: correct?? d^2?
 
         if (dr::none_or<false>(valid))
             return { ds, dr::zeros<Spectrum>() };
