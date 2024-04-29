@@ -31,7 +31,7 @@ def lathe(points, n_theta=32):
     faces_mesh = []
     num_points_2d = points.shape[0]
     points_mesh.append(points)
-    for rot_id, theta in enumerate(np.linspace(0, 2 * np.pi, n_theta + 1)[1:]):
+    for rot_id, theta in enumerate(np.linspace(0, 2.0 * np.pi, n_theta + 1)[1:]):
         R = Rotation.from_rotvec(np.array([0,0,theta]))
         points_rot = R.apply(points)
         points_mesh.append(points_rot)
