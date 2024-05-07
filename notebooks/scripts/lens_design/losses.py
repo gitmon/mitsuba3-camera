@@ -21,7 +21,8 @@ def rms_loss(image: mi.Color3f):
     i = dr.arange(mi.Float, image.shape[0])
     j = dr.arange(mi.Float, image.shape[1])
     ii, jj = dr.meshgrid(i, j, indexing='ij')
-    I = scaled_image[:,:,0]     # TODO: use grayscale version of the image
+    # I = scaled_image[:,:,0]     # TODO: use grayscale version of the image
+    I = (scaled_image[:,:,0] + scaled_image[:,:,1] + scaled_image[:,:,2]) / 3.0
     ibar = dr.sum(ii * I) / dr.sum(I)
     jbar = dr.sum(jj * I) / dr.sum(I)
     rms_sq = dr.sum(I * (dr.sqr(ii - ibar) + dr.sqr(jj - jbar))) * dr.rcp(dr.sum(I))

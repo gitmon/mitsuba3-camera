@@ -233,3 +233,102 @@ def meshplot_gizmo(mplot):
     mplot.add_lines(np.zeros(3), np.array([0,2,0]), shading={"line_color": "green"})
     mplot.add_lines(np.zeros(3), np.array([0,0,2]), shading={"line_color": "red"})
 
+
+
+
+
+def create_surface_geometry(
+        N: int, 
+        r_element: float, 
+        compute_z: tp.Callable, 
+        c: float = None, 
+        baffle_radius: float = 5.0, 
+        flip_normals: bool = False):
+    '''
+    Constructs the geometry of one lens surface in an optical system. This comprises two 
+    meshes: one describing the surface element itself, and another "baffle"/"aperture" 
+    mesh to block rays whose intersections lie outside the radial extent of the lens.
+
+    Inputs: 
+    - N: int. The mesh refinement level.
+    - r_element: float. The radial extent of the element.
+    - compute_z: Function(x, y) -> z. The sag function of the element surface.
+    - c: float (optional). The curvature of the element evaluated at z = 0.
+    - baffle_radius: float (optional). The maximum radius of the baffle. Default: 5.0.
+
+    Outputs:
+    - V_lens, F_lens. Mesh data for the lens element.
+    - V_ap, F_ap. Mesh data for the aperture/baffle surrounding the lens element.
+    - ap_mask: np.ndarray[bool]. Mask arrays for accessing/modifying the
+        positions of the baffle vertex positions.
+    '''
+    # =======================================================
+    # build hemispheric mesh template
+    # =======================================================
+    def draw_quad(v0, v1, v2, v3, flip=False):
+        f1 = [v0, v1, v2]
+        f2 = [v2, v3, v0]
+        if flip:
+            f1[0], f1[1] = f1[1], f1[0]
+            f2[0], f2[1] = f2[1], f2[0]
+        return [f1, f2]
+
+    if c is None:
+        h = 1e-2 * r_element
+        c = np.abs(compute_z(h, h) - compute_z(0, 0)).item() / (h ** 2)
+
+    # =======================================================
+    # build lens element geometry
+    # =======================================================
+
+    # NOTE: by default, the normals of the surface are always pointing towards +z. 
+    # Be sure to set the materials accordingly!
+    
+    # front side: scale hemisphere by element radius, and then apply the sag 
+    # function `compute_z(x,y)`
+    V_lens, F_lens = get_spherical_cap(N, r_element, c)
+    if flip_normals:
+        F_lens[:,[0,1]] = F_lens[:,[1,0]]
+
+    V_lens[:,2] = compute_z(V_lens[:,0], V_lens[:,1])
+    Nv, Nf = V_lens.shape[0], F_lens.shape[0]
+
+    # find the vertex/edge loop for the unclosed side of the hemisphere
+    open_vertices = boundary_loops(F_lens)[0]
+    Nvo = len(open_vertices)
+
+    # mask for accessing the open vertices
+    lens_ov_mask = np.zeros(Nv).astype(bool)
+    lens_ov_mask[open_vertices] = True
+
+    # =======================================================
+    # build aperture mesh to occlude rays beyond the element's extents
+    # =======================================================
+
+    def clip_to_box(V, xmax):
+        V_ = V.copy()
+        V_[:,:2] *= xmax / np.linalg.norm(V[:,:2], axis=1, ord=np.inf)[:,None]
+        return V_
+
+    V_ap_el = V_lens[open_vertices]
+    V_ap_edge = clip_to_box(V_ap_el, baffle_radius)
+
+    F_ap = []
+    # look through the open vertices at `r = r_elem` in a CW/CCW direction
+    for idx in range(Nvo):
+        next_idx = (idx + 1) if (idx + 1 < Nvo) else 0
+        # ap_edge -> ap_el
+        F_ap += draw_quad(
+            idx, next_idx,                  # V_ap_edge[idx],    V_ap_edge[next_idx]
+            Nvo + next_idx, Nvo + idx,      # V_ap_el[next_idx], V_ap_el[idx]
+            True)
+        # ap_el -> ap_edge
+        F_ap += draw_quad(
+            Nvo + idx, Nvo + next_idx,      # V_ap_el[idx],        V_ap_el[next_idx]
+            next_idx,idx,                   # V_ap_edge[next_idx], V_ap_edge[idx]
+            True)
+
+    V_ap = np.vstack((V_ap_el, V_ap_edge))
+    F_ap = np.array(F_ap, dtype=np.int32)
+
+    return V_lens, F_lens, V_ap, F_ap, lens_ov_mask
