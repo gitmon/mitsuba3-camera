@@ -434,7 +434,7 @@ class LensSystem:
                  surfaces: tp.List[Surface], 
                  radial_extents: tp.List[float],
                  materials: tp.List [LensMaterial],
-                 optimize_mat: bool = False,
+                 optimize_mat: bool = True,
                  optimize_shape: bool = True,
                  ):
 

@@ -210,23 +210,13 @@ public:
     DispersiveDielectric(const Properties &props) : Base(props) {
 
         // Specifies the internal index of refraction at the interface
-        // // TODO
-        // ScalarFloat int_ior = lookup_ior(props, "int_ior", "bk7");
-
-        // // TODO
-        // // Specifies the external index of refraction at the interface
-        // ScalarFloat ext_ior = lookup_ior(props, "ext_ior", "air");
-
-        // if (int_ior < 0 || ext_ior < 0)
-        //     Throw("The interior and exterior indices of refraction must"
-        //           " be positive!");
-
-        // TODO: we must delay the evaluation of int/ext_ior until the 
-        // ray's wavelength is known
         m_int_ior_D = props.get<ScalarFloat>("int_ior", 1.5046f);
         m_int_V_D   = props.get<ScalarFloat>("int_V_d",  64.17f);
+        // Specifies the external index of refraction at the interface
         m_ext_ior_D = props.get<ScalarFloat>("ext_ior", 1.0000f);
         m_ext_V_D   = props.get<ScalarFloat>("ext_V_d",   0.00f);
+        // (we must delay the evaluation of int/ext_ior(lambda) until the 
+        // ray's wavelength is known)
 
         if (props.has_property("specular_reflectance"))
             m_specular_reflectance   = props.texture<Texture>("specular_reflectance", 0.f);
@@ -243,11 +233,19 @@ public:
     }
 
     void traverse(TraversalCallback *callback) override {
-        callback->put_parameter("int_ior_d", m_int_ior_D, +ParamFlags::Differentiable);
-        callback->put_parameter("ext_ior_d", m_ext_ior_D, +ParamFlags::Differentiable);
-        callback->put_parameter("int_V_d", m_int_V_D, +ParamFlags::Differentiable);
-        callback->put_parameter("ext_V_d", m_ext_V_D, +ParamFlags::Differentiable);
+        callback->put_parameter("int_ior_d", m_int_ior_D, ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        callback->put_parameter("ext_ior_d", m_ext_ior_D, ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        callback->put_parameter("int_V_d",   m_int_V_D,   ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        callback->put_parameter("ext_V_d",   m_ext_V_D,   ParamFlags::Differentiable | ParamFlags::Discontinuous);
     }
+
+    void parameters_changed(const std::vector<std::string> &/*keys*/ = {}) override {
+        dr::make_opaque(m_int_ior_D);
+        dr::make_opaque(m_ext_ior_D);
+        dr::make_opaque(m_int_V_D);
+        dr::make_opaque(m_ext_V_D);
+    }
+
 
     std::pair<BSDFSample3f, Spectrum> sample(const BSDFContext &ctx,
                                              const SurfaceInteraction3f &si,
@@ -261,11 +259,18 @@ public:
 
         Float eta = eval_ior(m_int_ior_D, m_int_V_D, si) * dr::rcp(eval_ior(m_ext_ior_D, m_ext_V_D, si));
 
+        // std::cout << "Interface: int = " << m_int_ior_D << ", ext = " << m_ext_ior_D << std::endl;
+        // std::cout << "Eta = " << eta << std::endl;
+
         // Evaluate the Fresnel equations for unpolarized illumination
         Float cos_theta_i = Frame3f::cos_theta(si.wi);
 
         auto [r_i, cos_theta_t, eta_it, eta_ti] = fresnel(cos_theta_i, eta);
         Float t_i = 1.f - r_i;
+
+        // std::cout << "transmitted: " << eta_ti << std::endl;
+
+
 
         // Lobe selection
         BSDFSample3f bs = dr::zeros<BSDFSample3f>();
@@ -404,7 +409,7 @@ public:
     }
 
     // template <typename Float, typename Spectrum>
-    Float eval_ior(ScalarFloat ior, ScalarFloat V_D, const SurfaceInteraction3f& si) const {
+    Float eval_ior(Float ior, Float V_D, const SurfaceInteraction3f& si) const {
         if constexpr (!is_spectral_v<Spectrum>) {
             // if not rendering in spectral mode, return the "nominal" IOR 
             // (computed for a standard wavelength, 589.3 nm)
@@ -417,21 +422,21 @@ public:
     }
 
     // template <typename Float, typename Spectrum>
-    Float eval_ior(ScalarFloat ior_D, ScalarFloat V_D, Float wavelength) const {
-        ScalarFloat B = dr::select(V_D > dr::Epsilon<ScalarFloat>, 
+    Float eval_ior(Float ior_D, Float V_D, Float wavelength) const {
+        Float B = dr::select(V_D > dr::Epsilon<Float>, 
             (ior_D - 1.f) * dr::rcp(V_D * (dr::rcp(dr::sqr(0.48613f)) - dr::rcp(dr::sqr(0.65627f)))),
             0.f);
-        ScalarFloat A = ior_D - B * dr::rcp(dr::sqr(0.5893f));
+        Float A = ior_D - B * dr::rcp(dr::sqr(0.5893f));
         return A + B * dr::rcp(dr::sqr(wavelength));
     }
 
     MI_DECLARE_CLASS()
 private:
     // ior_d: the refractive index at 589.3 nm (helium spectral line)
-    ScalarFloat m_int_ior_D, m_ext_ior_D;
+    Float m_int_ior_D, m_ext_ior_D;
     // V_d: the abbe number, computed as
     //  (eta_D - 1) / (eta_F - eta_C)
-    ScalarFloat m_int_V_D, m_ext_V_D;
+    Float m_int_V_D, m_ext_V_D;
     ref<Texture> m_specular_reflectance;
     ref<Texture> m_specular_transmittance;
 
