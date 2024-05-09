@@ -21,6 +21,8 @@ import meshplot as mp
 from igl import read_triangle_mesh
 from os.path import join
 
+baffle_radius = 5.0
+
 class Surface:
     def __init__(self, params: dict):
         self.params = params
@@ -75,13 +77,13 @@ class EvenAsphericSurface(Surface):
                  c:   float, 
                  K:   float, 
                  z0:  float, 
-                 a4:  float,
-                 a6:  float,
-                 a8:  float,
-                 a10: float,
-                 a12: float,
-                 a14: float,
-                 a16: float,
+                 a4:  float = 0.0,
+                 a6:  float = 0.0,
+                 a8:  float = 0.0,
+                 a10: float = 0.0,
+                 a12: float = 0.0,
+                 a14: float = 0.0,
+                 a16: float = 0.0,
                  ):
         params = {
             'c'  : c,
@@ -155,6 +157,24 @@ class LensMaterial:
             # 'V_d': mi.ScalarFloat(abbe_number),
         }
         self.param_keys_to_opt_keys = None
+        self.active_optvars = [key for key, _ in self.params.items()]
+
+
+    def remove_optvar(self, param_name: str):
+        try:
+            self.active_optvars.remove(param_name)
+        except ValueError:
+            print(f"Warning: {param_name} was not found in optvar list!")
+            pass
+
+
+    def remove_optvars(self, params_to_disable: tp.List[str]):
+        active_optvars = [var for var in self.active_optvars if var not in params_to_disable]
+        self.active_optvars = active_optvars
+
+
+    def remove_all_optvars(self):
+        self.active_optvars = []
 
 
     def add_to_optimizer(self, optimizer: mi.ad.Optimizer) -> None:
@@ -169,6 +189,11 @@ class LensMaterial:
 
         # iterate through all the material params
         for param_name, param_value in self.params.items():
+
+            # if this parameter is disabled for optimization, skip adding it to `opt`
+            if param_name not in self.active_optvars:
+                continue
+
             optvar_key = f'mat_{self.name}_{param_name}'
             if optvar_key in optimizer:
                 raise KeyError(f"Variable {optvar_key} already exists in optimizer!")
@@ -200,7 +225,7 @@ class LensMaterial:
 
 
 
-class LensElementV2:
+class LensElement:
     def __init__(self, 
         element_id: int, 
         # element sizes
@@ -230,6 +255,7 @@ class LensElementV2:
         self.lens_fname = None
         self.baffle_fname = None
         self.is_world_facing = is_world_facing
+        self.active_optvars = [key for key, _ in self.surface.params.items()]
 
 
     def initialize_geometry(self, output_dir: str) -> None:
@@ -242,6 +268,7 @@ class LensElementV2:
             compute_z = self.surface.compute_z_np,
             c = self.surface.params['c'],
             flip_normals = not(self.is_world_facing),
+            baffle_radius = baffle_radius,
         )
         
         lens_mesh   = create_mesh(V_lens, F_lens, f"lens{self.id}")
@@ -262,16 +289,16 @@ class LensElementV2:
             self.baffle_fname = baffle_fname
 
 
-    def meshplot_geometry(self, p_ = None, lens_c = np.array([0,1,1]), baffle_c = np.array([0,1,0])) -> None:
+    def meshplot_geometry(self, p_ = None, lens_c = np.array([0,1,1]), baffle_c = np.array([0,1,0]), **kwargs) -> None:
         '''
         Visualize the lens geometry using Meshplot.
         '''
         if p_ is None:
-            p_ = mp.plot(*read_triangle_mesh(self.lens_fname), c=lens_c)
+            p_ = mp.plot(*read_triangle_mesh(self.lens_fname), c=lens_c, **kwargs)
         else:
-            p_ .add_mesh(*read_triangle_mesh(self.lens_fname), c=lens_c)
+            p_ .add_mesh(*read_triangle_mesh(self.lens_fname), c=lens_c, **kwargs)
             
-        p_.add_mesh(*read_triangle_mesh(self.baffle_fname), c=baffle_c)
+        p_.add_mesh(*read_triangle_mesh(self.baffle_fname), c=baffle_c, **kwargs)
 
         return p_
 
@@ -318,7 +345,7 @@ class LensElementV2:
 
         if lens_key not in scene_dict:
             scene_dict[lens_key] = lens_dict
-            print(lens_dict)
+            # print(lens_dict)
         else:
             raise KeyError(f"Lens `{lens_key}` already exists in scene!")
 
@@ -341,9 +368,11 @@ class LensElementV2:
         # iterate through *all* the shape params
         # self.surface.params = {'c': 1.0, 'K', 1.0, ...}
         for var_name, value in self.surface.params.items():
-            # XXXXX
-            # if var_name != 'c':
-            #     continue
+
+            # if this parameter is disabled for optimization, skip adding it to `opt`
+            if var_name not in self.active_optvars:
+                continue
+
             optvar_key = f'lens{self.id}_{var_name}'
             if optvar_key in optimizer:
                 raise KeyError(f"Variable {optvar_key} already exists in optimizer!")
@@ -375,9 +404,6 @@ class LensElementV2:
         # the materials' updated values into the lens BSDF
         # NOTE: materials update *must* be performed before LensElement update
 
-        # XXXXXX
-        # print(type(params[f'{self.lens_key}.bsdf.int_ior_d']))  # this is `float`
-        # print(type(self.int_material.params['ior']))            # this is `cuda.ad.Float`
         params[f'{self.lens_key}.bsdf.int_ior_d'] = self.int_material.params['ior']
         params[f'{self.lens_key}.bsdf.int_V_d']   = self.int_material.params['V_d']
         params[f'{self.lens_key}.bsdf.ext_ior_d'] = self.ext_material.params['ior']
@@ -409,8 +435,8 @@ class LensElementV2:
         # surface whenever the latter's axial position is modified
 
         lens_ovs_z = self.surface.compute_z_dr(
-            self.initial_baffle_vertices[0] * 0. + self.radial_extent,
-            self.initial_baffle_vertices[1] * 0.)
+            self.radial_extent, 
+            mi.Float(0.0)) * dr.ones(mi.Float, dr.width(self.initial_baffle_vertices))
 
         # update the baffle vertices' z-positions
         new_baffle_pos = mi.Point3f(
@@ -425,8 +451,184 @@ class LensElementV2:
         # Propagate changes through the scene (e.g. rebuild BVH)
         # NOTE: BVH update is performed in LensSystem
 
+    def remove_optvar(self, param_name: str):
+        try:
+            self.active_optvars.remove(param_name)
+        except ValueError:
+            print(f"Warning: {param_name} was not found in optvar list!")
+            pass
+
+    def remove_optvars(self, params_to_disable: tp.List[str]):
+        active_optvars = [var for var in self.active_optvars if var not in params_to_disable]
+        self.active_optvars = active_optvars
+
+    def remove_all_optvars(self):
+        self.active_optvars = []
 
 
+
+class ApertureElement:
+    def __init__(self, 
+        element_id: int, 
+        # element sizes
+        radial_extent: float,
+        # shape parameters
+        surface:  Surface,
+        # meshing parameters
+        N: int = 5, 
+        is_world_facing: bool = True,
+        ):
+        '''
+        NOTE: the element's BSDF defines an *interface* between two refractive mediums. 
+        Thus, need pointers to the media/materials themselves, where the refractive 
+        properties are actually controlled.
+        '''
+
+        self.subdiv_level = N
+        self.radial_extent  = radial_extent
+        self.id = element_id
+        self.surface = surface
+        self.param_keys_to_opt_keys = None
+        self.ap_fname = None
+        self.is_world_facing = is_world_facing
+        self.active_optvars = [key for key, _ in self.surface.params.items()]
+
+
+    def initialize_geometry(self, output_dir: str) -> None:
+        '''
+        Create the lens geometry and save it to `output_dir`.
+        '''
+        _, _, V_ap, F_ap, _ = create_surface_geometry(
+            N = self.subdiv_level,
+            r_element = self.radial_extent,
+            compute_z = self.surface.compute_z_np,
+            c = 0.0,
+            flip_normals = not(self.is_world_facing),
+            baffle_radius = baffle_radius,
+        )
+        
+        ap_mesh = create_mesh(V_ap, F_ap, f"baffle{self.id}")
+
+        ap_fname = join(output_dir, f'baffle{self.id}.ply')
+        ap_mesh.write_ply(ap_fname)
+        print('[+] Wrote aperture mesh file to: {}'.format(ap_fname))
+        
+        if self.ap_fname is None:
+            self.ap_fname = ap_fname
+
+
+    def meshplot_geometry(self, p_ = None, lens_c = np.array([0,1,1]), **kwargs) -> None:
+        '''
+        Visualize the lens geometry using Meshplot.
+        '''
+        if p_ is None:
+            p_ = mp.plot(*read_triangle_mesh(self.ap_fname), c=lens_c, **kwargs)
+        else:
+            p_ .add_mesh(*read_triangle_mesh(self.ap_fname), c=lens_c, **kwargs)
+            
+        return p_
+
+
+    def add_to_scene(self, scene_dict) -> None:
+        '''
+        Register the lens element in the scene dictionary.
+        '''
+        ap_key = f"lens{self.id}_AP"
+
+        if 'black-bsdf' not in scene_dict:
+            scene_dict['black-bsdf'] = {
+                'type': 'diffuse',
+                'id': 'black-bsdf',
+                'reflectance': { 'type': 'spectrum', 'value': 0 },
+            }
+
+        ap_dict = {
+                'type': 'ply',
+                'id': ap_key,
+                'filename': self.ap_fname,
+                'bsdf': {'type': 'ref', 'id': 'black-bsdf'},
+            }
+
+        if ap_key not in scene_dict:
+            scene_dict[ap_key] = ap_dict
+        else:
+            raise KeyError(f"Aperture `{ap_key}` already exists in scene!")
+
+        self.ap_key = ap_key
+
+
+    def add_to_optimizer(self, optimizer: mi.ad.Optimizer) -> None:
+        '''
+        Register the shape parameters for this lens in the optimizer.
+        '''
+        pass
+
+        if self.param_keys_to_opt_keys is None:
+            self.param_keys_to_opt_keys = {}
+
+        # iterate through *all* the shape params
+        # self.surface.params = {'c': 1.0, 'K', 1.0, ...}
+        for var_name, value in self.surface.params.items():
+
+            # if this parameter is disabled for optimization, skip adding it to `opt`
+            if var_name not in self.active_optvars:
+                continue
+
+            optvar_key = f'ap{self.id}_{var_name}'
+            if optvar_key in optimizer:
+                raise KeyError(f"Variable {optvar_key} already exists in optimizer!")
+            else:
+                optimizer[optvar_key] = mi.Float(value)
+                self.param_keys_to_opt_keys[var_name] = optvar_key
+
+    def save_init_state(self, params: mi.SceneParameters):
+        '''
+        Must run this after the lens is added to the scene and the `scene` object is initialized.
+        '''
+        self.initial_ap_vertices = dr.unravel(mi.Point3f, params[f'{self.ap_key}.vertex_positions'])
+
+
+    def update(self, params: mi.SceneParameters, optimizer: mi.ad.optimizers.Optimizer) -> None:
+        '''
+        Update lens element with the new values of the optimized variables, and recompute the lens geometry.
+        '''
+        if self.param_keys_to_opt_keys is None:
+            return
+
+        # Next, update the baffle's vertex positions. In practice, only their z-positions
+        # are able to change; they should be updated to match the open boundary of the lens 
+        # surface whenever the latter's axial position is modified
+
+        lens_ovs_z = self.surface.compute_z_dr(
+            self.radial_extent, 
+            mi.Float(0.0)) * dr.ones(mi.Float, dr.width(self.initial_baffle_vertices))
+
+        # update the aperture vertices' z-positions
+        new_ap_pos = mi.Point3f(
+            self.initial_ap_vertices[0],
+            self.initial_ap_vertices[1],
+            lens_ovs_z,
+        )
+
+        # Flatten the vertex position array before assigning it to `params`
+        params[f'{self.ap_key}.vertex_positions'] = dr.ravel(new_ap_pos)
+
+        # Propagate changes through the scene (e.g. rebuild BVH)
+        # NOTE: BVH update is performed in LensSystem
+
+    def remove_optvar(self, param_name: str):
+        try:
+            self.active_optvars.remove(param_name)
+        except ValueError:
+            print(f"Warning: {param_name} was not found in optvar list!")
+            pass
+
+    def remove_optvars(self, params_to_disable: tp.List[str]):
+        active_optvars = [var for var in self.active_optvars if var not in params_to_disable]
+        self.active_optvars = active_optvars
+
+    def remove_all_optvars(self):
+        self.active_optvars = []
 
 
 class LensSystem:
@@ -434,8 +636,6 @@ class LensSystem:
                  surfaces: tp.List[Surface], 
                  radial_extents: tp.List[float],
                  materials: tp.List [LensMaterial],
-                 optimize_mat: bool = True,
-                 optimize_shape: bool = True,
                  ):
 
         if not (len(radial_extents) == len(surfaces)):
@@ -449,8 +649,8 @@ class LensSystem:
         air_material = LensMaterial()
         materials = [air_material] + materials
         num_materials = len(materials)
-        for mat in materials:
-            print(mat)
+        # for mat in materials:
+        #     print(mat)
 
         #
         elements = []
@@ -459,7 +659,8 @@ class LensSystem:
             # materials in the list. For the last element, we wrap the `next` material back
             # to material[0] (air).
             next_mat_idx = (idx + 1) % num_materials
-            elem = LensElementV2(
+            elem = LensElement(
+                N=7,
                 element_id = len(elements),
                 radial_extent = radial_extents[idx],
                 surface = surfaces[idx],
@@ -472,10 +673,8 @@ class LensSystem:
         self.elements = elements
         self.rear_z = elements[0].surface.params['z0']
         self.front_z = elements[-1].surface.params['z0']
+        self.front_radial_extent = radial_extents[-1]
         self.materials = materials
-
-        self.optimize_mat = optimize_mat
-        self.optimize_shape = optimize_shape
 
     def size(self):
         return len(self.elements)
@@ -494,7 +693,7 @@ class LensSystem:
         # Update scene params at the end to rebuild the BVH
         params.update()
 
-    def meshplot_geometry(self, p_ = None):
+    def meshplot_geometry(self, p_ = None, **kwargs):
         '''
         Visualize the lens system's geometry using Meshplot.
         '''
@@ -505,13 +704,13 @@ class LensSystem:
         colors = colors[:,:3]
         
         if p_ is None:
-            p_ = self.elements[0].meshplot_geometry(lens_c=colors[0], baffle_c=colors[0] * 0.5)
+            p_ = self.elements[0].meshplot_geometry(lens_c=colors[0], baffle_c=colors[0] * 0.5, **kwargs)
         else:
-            p_ = self.elements[0].meshplot_geometry(p_=p_, lens_c=colors[0], baffle_c=colors[0] * 0.5)
+            p_ = self.elements[0].meshplot_geometry(p_=p_, lens_c=colors[0], baffle_c=colors[0] * 0.5, **kwargs)
 
         for element in self.elements[1:]:
             c = colors[element.id]
-            element.meshplot_geometry(p_=p_, lens_c=c, baffle_c=c * 0.5)
+            element.meshplot_geometry(p_=p_, lens_c=c, baffle_c=c * 0.5, **kwargs)
 
         return p_
 
@@ -519,15 +718,91 @@ class LensSystem:
         for element in self.elements:
             element.add_to_scene(scene_dict)
 
+        # add a box around the lens elements and baffles
+        zmax = self.front_z * 1.1
+        rmax = baffle_radius
+        origins = [
+            np.array([ 1, 0, 0]),
+            np.array([-1, 0, 0]),
+            np.array([0,  1, 0]),
+            np.array([0, -1, 0]),
+        ]
+        z_vector = np.array([0,0,1])
+        for i, origin in enumerate(origins):
+            scene_key = f'camera_housing_{i}'
+            box_dict = {
+                # 'type': 'rectangle',
+                'type': 'obj',
+                'id': scene_key,
+                'filename': 'meshes/rectangle.obj',
+                'to_world': mi.ScalarTransform4f.scale([rmax, -rmax, zmax / 2]) @ 
+                            mi.ScalarTransform4f.look_at(
+                                origin=z_vector + origin,
+                                target=z_vector + origin * 0,
+                                up=[0, 0, 1]),
+                'bsdf': {'type': 'ref', 'id': 'black-bsdf'},
+            }
+            scene_dict[scene_key] = box_dict
+
+
+    def disable_all_surfaces(self):
+        '''
+        Disable optimization of all lens surfaces' parameters.
+        '''
+        for element in self.elements:
+            element.remove_all_optvars()
+
+    def disable_all_materials(self):
+        '''
+        Disable optimization of all lens materials' parameters.
+        '''
+        for material in self.materials:
+            material.remove_all_optvars()
+
+    def disable_surface_at_index(self, index: int):
+        '''
+        Disable optimization of the i-th surface's shape parameters.
+        '''
+        self.elements[index].remove_all_optvars()
+
+    def disable_material_at_index(self, index: int):
+        '''
+        Disable optimization of the i-th material's parameters.
+        '''
+        self.materials[index].remove_all_optvars()
+
+    def disable_surface_vars(self, param_name: str):
+        '''
+        Disable optimization of the parameter `param_name` in all surfaces.
+        '''
+        for element in self.elements:
+            element.remove_optvar(param_name)
+
+    def disable_material_vars(self, param_name: str):
+        '''
+        Disable optimization of the parameter `param_name` in all materials.
+        '''
+        for material in self.materials:
+            material.remove_optvar(param_name)
+
+    def disable_var_in_surface(self, param_name: str, index: int):
+        '''
+        Disable optimization of the parameter `param_name` in the i-th surface.
+        '''
+        self.elements[index].remove_optvar(param_name)
+
+    def disable_var_in_material(self, param_name: str, index: int):
+        '''
+        Disable optimization of the parameter `param_name` in the i-th material.
+        '''
+        self.materials[index].remove_optvar(param_name)
 
     def add_to_optimizer(self, optimizer):
-        if self.optimize_mat:
-            for material in self.materials:
-                    material.add_to_optimizer(optimizer)
+        for material in self.materials:
+                material.add_to_optimizer(optimizer)
 
-        if self.optimize_shape:
-            for element in self.elements:
-                element.add_to_optimizer(optimizer)
+        for element in self.elements:
+            element.add_to_optimizer(optimizer)
 
 
     def initialize_geometry(self, output_dir):

@@ -43,6 +43,105 @@ class BasicPRBIntegrator(RBIntegrator):
 
     """
 
+    def trace(self,
+               scene: mi.Scene,
+               ray: mi.Ray3f,
+               num_lenses: int,
+    ) -> Tuple[mi.Spectrum, mi.Bool, List[mi.Float], mi.Spectrum]:
+        """
+        See ``ADIntegrator.sample()`` for a description of this interface and
+        the role of the various parameters and return values.
+        """
+        # Rendering a primal image? (vs performing forward/reverse-mode AD)
+        primal = True
+
+        # Standard BSDF evaluation context for path tracing
+        bsdf_ctx = mi.BSDFContext()
+
+        # --------------------- Configure loop state ----------------------
+
+        # Copy input arguments to avoid mutating the caller's state
+        ray = mi.Ray3f(ray)
+        penultimate_ray = mi.Ray3f(ray)
+        depth = mi.UInt32(0)                        # Depth of current vertex
+        L = mi.Spectrum(0)                          # Radiance accumulator
+        δL = mi.Spectrum(0)                         # Differential/adjoint radiance
+        β = mi.Spectrum(1)                          # Path throughput weight
+        active = mi.Bool(True)                      # Active SIMD lanes
+        si = dr.zeros(mi.SurfaceInteraction3f, dr.width(ray))
+
+        num_lenses = mi.UInt32(num_lenses)
+
+        # Record the following loop in its entirety
+        loop = mi.Loop(name="Tracer",
+                       state=lambda: (penultimate_ray, si, ray, depth, L, δL, β, active))
+
+        while loop(active):
+            active_next = mi.Bool(active)
+
+            # ---------------------- Direct emission ----------------------
+
+            # Compute a surface interaction that tracks derivatives arising
+            # from differentiable shape parameters (position, normals, etc.)
+            # In primal mode, this is just an ordinary ray tracing operation.
+            with dr.resume_grad(when=not primal):
+                si = scene.ray_intersect(ray)
+
+            # Hide the environment emitter if necessary
+            if self.hide_emitters:
+                active_next &= ~(dr.eq(depth, 0) & ~si.is_valid())
+
+            # Differentiable evaluation of intersected emitter / envmap
+            with dr.resume_grad(when=not primal):
+                Le = β * si.emitter(scene).eval(si, active_next)
+
+            # Should we continue tracing to reach one more vertex?
+            active_next &= (depth + 1 < self.max_depth) & si.is_valid()
+
+            # Get the BSDF. Potentially computes texture-space differentials.
+            bsdf = si.bsdf(ray)
+
+            # ------------------ Detached BSDF sampling -------------------
+
+            bsdf_sample, bsdf_weight = bsdf.sample(bsdf_ctx, si,
+                                                   # sampler->next1d(), chosen to be >=1.0 so that
+                                                   # the reflective path is never taken
+                                                   1.0,
+                                                   # sampler->next2d(), doesn't matter for dielectrics
+                                                   mi.Point2f(0.0, 0.0),    
+                                                   active_next)
+
+            # ---- Update loop variables based on current interaction -----
+
+            penultimate_ray = mi.Ray3f(ray)
+
+            L = L + Le if primal else L - Le
+            ray = si.spawn_ray(si.to_world(bsdf_sample.wo))
+            β *= bsdf_weight
+
+            # Don't run another iteration if the throughput has reached zero
+            active_next &= dr.any(dr.neq(β, 0))
+
+            # terminate rays that end on the film plane
+            depth[si.is_valid()] += 1
+
+            # if rays have NOT reached the film plane yet, continue
+            active_next &= (depth < num_lenses)
+            # active_next &= not(dr.allclose(0.0, si.p[2]))
+
+            active = active_next
+
+        self.penultimate_o = penultimate_ray.o
+        self.penultimate_d = penultimate_ray.d
+        # select rays that 1) have valid interactions (i.e. hit something),
+        # and 2) lie on the film plane (== they hit the film plane)
+        self.valid = si.is_valid() & dr.allclose(0.0, si.p.z)
+
+        return (self.penultimate_o, self.penultimate_d, self.valid, si.p)
+        # return (self.penultimate_o, self.penultimate_d, self.valid)
+
+
+
     def sample(self,
                mode: dr.ADMode,
                scene: mi.Scene,
@@ -57,7 +156,6 @@ class BasicPRBIntegrator(RBIntegrator):
         See ``ADIntegrator.sample()`` for a description of this interface and
         the role of the various parameters and return values.
         """
-
         # Rendering a primal image? (vs performing forward/reverse-mode AD)
         primal = mode == dr.ADMode.Primal
 

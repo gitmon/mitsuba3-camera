@@ -4,9 +4,19 @@ Helper functions for initializing lens-related geometry.
 import numpy as np
 import meshplot as mp
 import matplotlib.pyplot as plt
-from gpytoolbox import icosphere, remove_unreferenced, boundary_loops
+from gpytoolbox import icosphere, remove_unreferenced, remove_duplicate_vertices, boundary_loops
 from scipy.sparse import coo_matrix
+from scipy.spatial.transform import Rotation
 import typing as tp
+
+def draw_quad(v0, v1, v2, v3, flip=False):
+    f1 = [v0, v1, v2]
+    f2 = [v2, v3, v0]
+    if flip:
+        f1[0], f1[1] = f1[1], f1[0]
+        f2[0], f2[1] = f2[1], f2[0]
+    return [f1, f2]
+
 
 def face_vertex_adjacency_matrix(V: np.ndarray, F: np.ndarray):
     '''
@@ -31,9 +41,11 @@ def face_vertex_adjacency_matrix(V: np.ndarray, F: np.ndarray):
     M_FV = coo_matrix((values, (ff,vv)), shape=(Nf,Nv))
     return M_FV
 
-def get_hemisphere(N: int):
+def get_hemisphere_ico(N: int):
     '''
     Construct the triangle mesh of a +z-oriented hemisphere. The mesh is open at the boundary z = 0.
+    This version of the function meshes the hemisphere using an icosphere.
+
     Input: 
     - N: int. Mesh refinement level.
     Output:
@@ -57,6 +69,56 @@ def get_hemisphere(N: int):
 
     return V_, F_
 
+
+
+def get_hemisphere_uv(subdiv_level=3):
+    '''
+    Construct the triangle mesh of a +z-oriented hemisphere. The mesh is open at the boundary z = 0.
+    This version of the function meshes the hemisphere using a UV sphere.
+
+    Input: 
+    - N: int. Mesh refinement level.
+    Output:
+    - V: np.ndarray [Nv x 3]. Mesh vertex position data.
+    - F: np.ndarray [Nf x 3]. Mesh triangle data.
+    '''
+    N = 2 ** subdiv_level
+
+    # build the 2D section
+    thetas = np.linspace(0, np.pi / 2, N)
+    zs = np.cos(thetas)
+    xs = np.sin(thetas)
+    ys = np.zeros_like(thetas)
+
+    # perform a rotational sweep of the 2D section 
+    Vo = np.c_[xs, ys, zs]
+    Vs = [Vo]
+    Fs = []
+    Nv_2d = Vo.shape[0]
+    Nv_offset = 0
+    for phi in np.linspace(0, np.pi * 2, 2 * N + 1)[1:]:
+        Vs.append(Rotation.from_rotvec(np.array([0, 0, phi])).apply(Vo))
+        for idx in range(Nv_2d - 1):
+            if idx == 0:
+                F = [[idx + Nv_offset, idx + Nv_offset + 1, idx + Nv_offset + Nv_2d + 1]]
+            else:
+                F = draw_quad(
+                    idx + Nv_offset, idx + Nv_offset + 1,   # current edge
+                    idx + Nv_offset + Nv_2d + 1, idx + Nv_offset + Nv_2d,   # next set's edge
+                    )
+            Fs.append(F)
+
+        Nv_offset += Nv_2d
+    
+    # clean up duplicate vertices
+    Vs = np.concatenate(Vs)
+    Fs = np.concatenate(Fs)
+    Vs, _, _, Fs = remove_duplicate_vertices(Vs, epsilon=1e-12, faces=Fs)
+    Vs, Fs = remove_unreferenced(Vs, Fs)
+
+    return Vs, Fs
+
+
 def get_spherical_cap(N, elem_radius: float, abs_curvature: float):
     '''
     Construct the triangle mesh of a +z-oriented spherical cap. The mesh is open at the boundary,
@@ -72,7 +134,8 @@ def get_spherical_cap(N, elem_radius: float, abs_curvature: float):
     - F: np.ndarray [Nf x 3]. Mesh triangle data.
 
     '''
-    V, F = get_hemisphere(N)
+    V, F = get_hemisphere_ico(N)
+    # V, F = get_hemisphere_uv(N)
 
     target_angle = np.arcsin(elem_radius * max(abs_curvature, 1e-3))
     angle_rescale = target_angle / (0.5 * np.pi)
@@ -84,6 +147,7 @@ def get_spherical_cap(N, elem_radius: float, abs_curvature: float):
 
     V_[:,2] = vlens * np.cos(angles)
     V_[:,:2] *= (vlens * np.sin(angles) / np.linalg.norm(V[:,:2], axis=1))[:, None]
+    V_[np.isnan(V_)] = 0.0
 
     print("V_ lies on sphere:", np.allclose(np.linalg.norm(V_, axis=1), np.ones_like(vlens)))
 
@@ -120,14 +184,6 @@ def create_lens_geometry(N: int, r_film: float, r_world: float, z_film: tp.Calla
     # =======================================================
     # TODO: hemisphere is not the best choice when lens only subtends a small fraction of the total curvature radius
     # V, F = get_hemisphere(N)
-
-    def draw_quad(v0, v1, v2, v3, flip=False):
-        f1 = [v0, v1, v2]
-        f2 = [v2, v3, v0]
-        if flip:
-            f1[0], f1[1] = f1[1], f1[0]
-            f2[0], f2[1] = f2[1], f2[0]
-        return [f1, f2]
 
     # TODO
     if c_film is None:
