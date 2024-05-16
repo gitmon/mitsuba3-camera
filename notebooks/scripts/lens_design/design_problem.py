@@ -5,7 +5,7 @@ sys.path.append("..")
 import drjit as dr
 import mitsuba as mi
 import typing as tp
-from scripts.lens_design.losses import rms_loss
+from scripts.lens_design.losses import rms_loss, color_loss
 from scripts.lens_design.lens import LensSystem
 import numpy as np
 
@@ -28,7 +28,7 @@ class FieldSource:
         Max field angle in degrees
         '''
         source_radius = lens_system.front_radial_extent                  # TODO: EP radius
-        entrance_pupil_position = np.array([0, 0, lens_system.front_z])  # TODO: EP z-position
+        entrance_pupil_position = np.array([0, 0, lens_system.entrance_pupil_position])  # TODO: EP z-position
 
         max_field_angle = np.deg2rad(np.abs(max_field_angle))
         field_angles = np.linspace(0.0, max_field_angle, num_sources)
@@ -102,10 +102,11 @@ class FieldSource:
             raise AssertionError(f"Oh no! {is_valid=}")
         
         near_clip = 0.1
+        z_camera = max(0.3, 1.1 * near_clip)
         trafo_to_world = mi.ScalarTransform4f.look_at(
             target=[film_pos[0], film_pos[1], -1.0],
             # origin=[film_pos[0], film_pos[1], max(lens_rear_z - 1.0, 1.1 * near_clip)],
-            origin=[film_pos[0], film_pos[1], max(0.3, 1.1 * near_clip)],
+            origin=[film_pos[0], film_pos[1], z_camera],
             up=[0, 1, 0])
         
         sensor_dict = {
@@ -131,7 +132,16 @@ class FieldSource:
                 },
             }
         
+        init_pixel_size = z_camera * dr.deg2rad(0.5 * sensor_dict['fov']) / resolution[0]
+        self.init_pixel_area = init_pixel_size ** 2
+        
         return sensor_dict
+    
+    # def get_pixel_size(self):
+    #     z_camera = self.origin[2]
+    #     resolution = self.sensor_dict['film']['width']
+    #     pixel_size = z_camera * dr.deg2rad(0.5 * self.sensor_dict['fov']) / resolution
+    #     return pixel_size
     
 
 
@@ -152,8 +162,8 @@ class DesignProblem:
         self.lens_system = lens_system
 
         # TODO  XXXXX
-        self.num_sources = 3
-        self.max_field_angle = 7.0
+        self.num_sources = 5
+        self.max_field_angle = 5.0
 
     def add_field_sources(self, scene, geo_tracer):
         '''
@@ -174,31 +184,23 @@ class DesignProblem:
 
         self.field_sources = field_sources
 
-    # TODO xxxxxxxxxxx
-    def upsample_sensor(self, idx):
-        # up-res 2^N times, then crop the center section
-        # (Nx, Ny) = self.params['sensor.film.crop_size']
-        # self.params['sensor.film.size'] = (Nx * 2 ** N, Ny * 2 ** N)
-        # self.params['sensor.film.crop_size'] = (Nx, Ny)
-        # self.params['sensor.film.crop_offset'] = (Nx * 2 ** (N-1) - Nx // 2, Ny * 2 ** (N-1) - Ny // 2)
+    def upsample_sensor(self, idx, zoom_factor = 2.0):
+        '''Updates the sensor of index `idx` to do a 2x zoom on the center of the image field.
+        '''
         fov_key = f'{self.sensor_names[idx]}.x_fov'
         curr_fov = self.params[fov_key]
-        zoom_factor = 2.0
         zoom_fov = dr.rad2deg(2 * dr.atan(dr.rcp(zoom_factor) * dr.tan(0.5 * dr.deg2rad(curr_fov))))
         self.params[fov_key] = zoom_fov
 
-    def upsample_sensors(self):
+    def upsample_sensors(self, zoom_factor = 2.0):
         for idx in range(self.num_sources):
-            self.upsample_sensor(idx)
+            self.upsample_sensor(idx, zoom_factor)
 
 
     def _get_integrator(self, integrator_type: str):
         max_depth = self.lens_system.size() + 2
         integrator = {
-            # 'type': 'ptracer',
-            # 'type': 'prb_basic',
             'type': integrator_type,
-            'samples_per_pass': self.spp,
             'max_depth': max_depth,
             'hide_emitters': False,
         }
@@ -262,8 +264,49 @@ class DesignProblem:
         scene = mi.load_dict(scene)
         self.scene = scene
 
+        self.__test_geo_tracer(geo_tracer)
+
         del geo_tracer, geo_scene
         return scene
+    
+    def __test_geo_tracer(self, tracer):
+        ls = self.lens_system
+
+        z_init = ls.front_z * 1.1
+        r_max = ls.front_radial_extent * 0.001
+        theta_max = 0.001 * np.pi
+
+        N = 100
+
+        rs = r_max * (2.0 * mi.radical_inverse_2(dr.arange(mi.UInt32, N), mi.UInt32(0)) - 1.0)
+        thetas = theta_max * (2.0 * mi.sobol_2(dr.arange(mi.UInt32, N), mi.UInt32(0)) - 1.0)
+
+        # negate direction since ray is traveling backwards
+        dir = -mi.Vector3f(dr.tan(thetas), 0.0, 1.0)
+        ray = mi.Ray3f(o = mi.Point3f(rs, 0.0, z_init),
+                       d = dr.normalize(dir),
+                       wavelengths = [589.3])
+        
+        _, d_exact, _, out_exact = tracer(ray)
+        
+        # paraxial setup
+        y = rs - (z_init - ls.front_z) * np.tan(thetas)
+        u = np.tan(thetas)
+        ray_paraxial = mi.Vector2f(y, u)
+        out_paraxial = ls.trace_paraxial_front2film(ray_paraxial)
+
+        # print(out_exact.x)
+        # print(out_paraxial.x)
+        print(dr.max(dr.abs(out_exact.x - out_paraxial.x)))
+        print("y is close: ", dr.allclose(out_exact.x, out_paraxial.x, atol=2e-5, rtol=1e-8))
+        # print(d_exact.x / d_exact.z)
+        # print(out_paraxial.y)
+        print(dr.max(dr.abs(d_exact.x / d_exact.z - out_paraxial.y)))
+        print("u is close: ", dr.allclose(d_exact.x / d_exact.z, out_paraxial.y, atol=2e-5, rtol=1e-8))
+
+        return out_exact, out_paraxial
+
+
 
     def reset(self):
         self.scene = None
@@ -300,9 +343,6 @@ class DesignProblem:
         loss_values = []
         spp = self.spp
         upsample_steps = 0
-        upsample_flag = True
-        # upsample_steps = [0 for _ in range(self.num_sources)]
-        # upsample_flag = [False for _ in range(self.num_sources)]
 
         with dr.suspend_grad():
             images_init = [mi.render(self.scene, self.params, sensor=i) for i in range(self.num_sources)]
@@ -312,6 +352,7 @@ class DesignProblem:
             self.lens_system.update(self.params, self.optimizer)
 
             loss = mi.Float(0.0)
+            upsample_flag = True
             for sensor_idx in range(self.num_sources):
                 # Perform a differentiable rendering of the scene
                 image = mi.render(self.scene, 
@@ -322,9 +363,14 @@ class DesignProblem:
                                   sensor=sensor_idx)
 
                 # Scale-independent L2 function
-                sensor_loss = rms_loss(image)
-                loss += sensor_loss
-                upsample_flag &= sensor_loss[0] < dr.sqr(self.resolution[0] * 0.1)
+                sensor_rms_loss = rms_loss(image)
+                upsample_flag &= sensor_rms_loss[0] < dr.sqr(self.resolution[0] * 0.1)
+                sensor_color_loss = color_loss(image)
+
+                # XXXXX
+                sensor_rms_loss *= self.field_sources[sensor_idx].init_pixel_area
+                print(sensor_rms_loss, sensor_color_loss)
+                loss += sensor_rms_loss + sensor_color_loss
 
             # Back-propagate errors to input parameters and take an optimizer step
             dr.backward(loss)
@@ -339,12 +385,6 @@ class DesignProblem:
                 it / (self.iters-1),
                 f'Iteration {it:03d}: loss={current_loss:g}', 'Caustic Optimization', '')
 
-            # Increase rendering quality toward the end of the optimization
-            if it in (int(0.7 * self.iters), int(0.9 * self.iters)):
-                # spp *= 2
-                self.optimizer.set_learning_rate(0.5 * self.optimizer.lr_default)
-
-            # if loss[0] < self.num_sources * dr.sqr(self.resolution[0] * 0.1):
             if upsample_flag:
                 upsample_steps += 1
                 self.upsample_sensors()
@@ -354,25 +394,171 @@ class DesignProblem:
             else:
                 self.params.update(self.optimizer)
 
-            # for sensor_idx in range(self.num_sources):
-            #     if upsample_flag[sensor_idx]:
-            #         upsample_steps += 1
-            #         self.upsample_sensor(sensor_idx)
-            #         self.params.update(self.optimizer)
-            #         print(f"Iter {it}: upsampling sensor {sensor_idx} to level {upsample_steps} due to {loss[0] = }")
-            #         print(self.params['sensor.x_fov'])
+            # Increase rendering quality toward the end of the optimization
+            if it in (int(0.7 * self.iters), int(0.9 * self.iters)):
+                # spp *= 2
+                self.optimizer.set_learning_rate(0.5 * self.optimizer.lr_default)
 
-            # # Carry over the update to our "latent variable" (the heightmap values)
-            # self.params.update(self.optimizer)
-
-        # mi.set_log_level(mi.LogLevel.Info)
 
         with dr.suspend_grad():
             images_final = [mi.render(self.scene, self.params, spp=2 * spp, sensor=i) for i in range(self.num_sources)]
     
         return loss_values, images_final, images_init, upsample_steps
-    
 
+    def render(self, spp, sensor_idx = 0, resolution = None, zoom_factor = None):
+        with dr.suspend_grad():
+            if zoom_factor is not None:
+                self.upsample_sensors(zoom_factor)
+
+            if resolution is not None:
+                var_key = f"{self.sensor_names[sensor_idx]}.film.size"
+                curr_resolution = (self.params[var_key][0], self.params[var_key][1])
+                crop_size = self.params[f"{self.sensor_names[sensor_idx]}.film.crop_size"]
+                crop_offset = self.params[f"{self.sensor_names[sensor_idx]}.film.crop_offset"]
+                self.params[var_key] = (resolution[0], resolution[1])
+                self.params.update(self.optimizer)
+
+            image = mi.render(self.scene, 
+                        self.params, 
+                        spp=spp, 
+                        sensor=sensor_idx)
+
+            if zoom_factor is not None:
+                self.upsample_sensors(1 / zoom_factor)
+
+            if resolution is not None:
+                self.params[var_key] = curr_resolution
+                self.params[f"{self.sensor_names[sensor_idx]}.film.crop_size"] = crop_size
+                self.params[f"{self.sensor_names[sensor_idx]}.film.crop_offset"] = crop_offset
+                self.params.update(self.optimizer)
+
+        return image
+
+
+
+from typing_extensions import override
+
+class ConstrainedEFLProblem(DesignProblem):
+    def __init__(self, 
+                 lens_system: LensSystem,
+                 resolution: tp.Tuple[int, int], 
+                 spp: int, 
+                 learning_rate: float, 
+                 target_focal_length: float,
+                 iters: int,
+                 output_dir: str,
+                 film_diagonal: int = 35,
+                 ):
+        
+        self.target_focal_length = target_focal_length
+
+        # disable optimization of the rear surface's 1st order parameters
+        lens_system.disable_var_in_surface('c', 0)
+        # TODO: could still let z0 be free to get a better focus than the paraxial focus
+        lens_system.disable_var_in_surface('z0', 0)
+
+        # set first surface
+        s1_params = lens_system.get_rear_surface_params(target_focal_length)
+        lens_system.elements[0].surface.params['c']  = s1_params['c' ].numpy().item()
+        lens_system.elements[0].surface.params['z0'] = s1_params['z0'].numpy().item()
+        lens_system.compute_paraxial_quantities()
+
+        print("Focal length target: ", 
+                lens_system.compute_EFL(), " vs. ",
+                target_focal_length)
+        print("BFL focus target: ", 
+                lens_system.compute_BFL(), " vs. ",
+                lens_system.elements[0].surface.params['z0'])
+        
+        lens_system.initialize_geometry(output_dir)
+        lens_system.disable_all_materials()
+
+        super().__init__(lens_system, resolution, spp, learning_rate, iters, film_diagonal)
+
+    @override
+    def optimize(self):
+        # print(self.optimizer.variables)
+        mi.set_log_level(mi.LogLevel.Warn)
+        loss_values = []
+        spp = self.spp
+        upsample_steps = 0
+        with dr.suspend_grad():
+            images_init = [mi.render(self.scene, self.params, sensor=i) for i in range(self.num_sources)]
+
+        for it in range(self.iters):
+            # Apply displacement and update the scene BHV accordingly
+            self.lens_system.fixed_EFL_update(self.params, self.optimizer, self.target_focal_length)
+            # print(self.optimizer.variables)
+
+            loss = mi.Float(0.0)
+            upsample_flag = True
+            for sensor_idx in range(self.num_sources):
+                # Perform a differentiable rendering of the scene
+                image = mi.render(self.scene, 
+                                  self.params, 
+                                  seed=it, 
+                                  spp=2 * spp, 
+                                  spp_grad=spp,
+                                  sensor=sensor_idx)
+
+                # RMS loss function
+                sensor_loss = rms_loss(image)
+                # fix for nans: leave out the higher order aspheres
+                # print("loss nan?: ", sensor_loss)
+                # print("isnan: ", np.any(np.isnan(image.numpy())))
+                upsample_flag &= sensor_loss[0] < dr.sqr(self.resolution[0] * 0.1)
+                
+                sensor_loss *= dr.detach(self.field_sources[sensor_idx].init_pixel_area / (4 ** upsample_steps))
+                loss += 10000 * sensor_loss
+
+
+                # XXXXX
+                # the color loss appears to be bad for rms!!!
+                
+                # # RMS and dispersion loss function
+                # sensor_rms_loss = rms_loss(image)
+                # upsample_flag &= sensor_rms_loss[0] < dr.sqr(self.resolution[0] * 0.1)
+                # sensor_rms_loss *= dr.detach(self.field_sources[sensor_idx].init_pixel_area / (4 ** upsample_steps))
+
+                # # # print(sensor_rms_loss / self.resolution[0], sensor_color_loss)
+                # # loss += sensor_rms_loss / self.resolution[0] + 1000 * sensor_color_loss
+
+                # sensor_color_loss = color_loss(image)
+                # loss += 1e4 * sensor_rms_loss + sensor_color_loss
+                # # print(sensor_rms_loss, sensor_color_loss)
+
+
+            # Back-propagate errors to input parameters and take an optimizer step
+            dr.backward(loss)
+
+            # Take a gradient step
+            self.optimizer.step()
+
+            # Log progress
+            current_loss = loss[0] # / (4 ** upsample_steps)
+            loss_values.append(current_loss)
+            mi.Thread.thread().logger().log_progress(
+                it / (self.iters-1),
+                f'Iteration {it:03d}: loss={current_loss:g}', 'Caustic Optimization', '')
+
+            if upsample_flag:
+                upsample_steps += 1
+                self.upsample_sensors()
+                self.params.update(self.optimizer)
+                print(f"Iter {it}: upsampling to level {upsample_steps} due to {loss[0] = }")
+                print(self.params[f'{self.sensor_names[0]}.x_fov'])
+            else:
+                self.params.update(self.optimizer)
+
+            # Increase rendering quality toward the end of the optimization
+            if it in (int(0.5 * self.iters), int(0.7 * self.iters)):
+                # spp *= 2
+                self.optimizer.set_learning_rate(0.1 * self.optimizer.lr_default)
+
+        with dr.suspend_grad():
+            images_final = [mi.render(self.scene, self.params, spp=2 * spp, sensor=i) for i in range(self.num_sources)]
+    
+        return loss_values, images_final, images_init, upsample_steps
 
 
 
@@ -392,7 +578,7 @@ def plot_progress(image_init, image_final, loss_values, upsample_steps, average_
     spot_size_init = np.sqrt(rms_loss(image_init).numpy()).item() * (2 ** upsample_steps)
     spot_size_final = np.sqrt(rms_loss(image_final).numpy()).item()
     show_image(ax[2], image_init, f'Initial spot size: {spot_size_init:.3f}')
-    show_image(ax[3], image_final / (100 * np.mean(image_final)),      f'Final spot size: {spot_size_final:.3f}')
+    show_image(ax[3], image_final / (30 * np.mean(image_final)),      f'Final spot size: {spot_size_final:.3f}')
     # show_image(ax[3], image_final,      f'Final spot size: {np.sqrt(rms_loss(image_final).numpy().item()):.3f}')
 
 
