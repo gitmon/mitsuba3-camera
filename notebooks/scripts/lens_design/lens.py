@@ -25,8 +25,9 @@ from os.path import join
 baffle_radius = 5.0
 
 class Surface:
-    def __init__(self, params: dict):
+    def __init__(self, radial_extent: float, params: dict):
         self.params = params
+        self.radial_extent = radial_extent
 
     def get_params(self):
         return self.params
@@ -37,18 +38,24 @@ class Surface:
     def compute_z_np(self, x, y):
         raise NotImplementedError()
     
+    def get_curvature(self):
+        '''
+        Get the curvature of the element expressed in dimensional units (1/mm).
+        '''
+        return self.params['c'] / self.radial_extent    # unitless quantity divided by length
+    
     # def intersect(self, ray: mi.Ray3f):
     #     raise NotImplementedError()
 
 
 class ConicSurface(Surface):
-    def __init__(self, c: float, K: float, z0: float):
+    def __init__(self, radial_extent: float, c: float, K: float, z0: float):
         params = {
-            'c': c,
+            'c': c * radial_extent,     # dimensionless curvature
             'K': K,
             'z0': z0,
         }
-        super().__init__(params)
+        super().__init__(radial_extent, params)
 
     def compute_z_dr(self, x, y):
         ''' 
@@ -58,9 +65,16 @@ class ConicSurface(Surface):
 
         This version of the function consumes and outputs `mi.Float` arrays.
         '''
+        # dimensional version
+        # r2 = dr.sqr(x) + dr.sqr(y)
+        # safe_sqr = dr.clamp(1 - (1 + self.params['K']) * dr.sqr(self.params['c']) * r2, 0.0, dr.inf)
+        # z = self.params['z0'] - r2 * self.params['c'] * dr.rcp(1 + dr.sqrt(safe_sqr))
+
+        # dimensionless version
         r2 = dr.sqr(x) + dr.sqr(y)
+        r2 *= dr.rcp(dr.sqr(self.radial_extent))
         safe_sqr = dr.clamp(1 - (1 + self.params['K']) * dr.sqr(self.params['c']) * r2, 0.0, dr.inf)
-        z = self.params['z0'] - r2 * self.params['c'] * dr.rcp(1 + dr.sqrt(safe_sqr))
+        z = self.params['z0'] - self.radial_extent * r2 * self.params['c'] * dr.rcp(1 + dr.sqrt(safe_sqr))
         return z
 
     def compute_z_np(self, x_, y_):
@@ -144,6 +158,7 @@ class ConicSurface(Surface):
 
 class EvenAsphericSurface(Surface):
     def __init__(self, 
+                 radial_extent: float,
                  c:   float, 
                  K:   float, 
                  z0:  float, 
@@ -155,19 +170,20 @@ class EvenAsphericSurface(Surface):
                  a14: float = 0.0,
                  a16: float = 0.0,
                  ):
+        # non-dimensionalized parameters
         params = {
-            'c'  : c,
+            'c'  : c * radial_extent,
             'K'  : K,
             'z0' : z0,
-            'a4' : a4,
-            'a6' : a6,
-            'a8' : a8,
-            'a10': a10,
-            'a12': a12,
-            'a14': a14,
-            'a16': a16,
+            'a4' : a4  * radial_extent ** 3,
+            'a6' : a6  * radial_extent ** 5,
+            'a8' : a8  * radial_extent ** 7,
+            'a10': a10 * radial_extent ** 9,
+            'a12': a12 * radial_extent ** 11,
+            'a14': a14 * radial_extent ** 13,
+            'a16': a16 * radial_extent ** 15,
         }
-        super().__init__(params)
+        super().__init__(radial_extent, params)
 
     def compute_z_dr(self, x, y):
         ''' 
@@ -178,6 +194,7 @@ class EvenAsphericSurface(Surface):
         This version of the function consumes and outputs `mi.Float` arrays.
         '''
         r2 = dr.sqr(x) + dr.sqr(y)
+        r2 *= dr.rcp(dr.sqr(self.radial_extent))
         z = self.params['a16']
         z = dr.fma(z, r2, self.params['a14'])
         z = dr.fma(z, r2, self.params['a12'])
@@ -185,11 +202,16 @@ class EvenAsphericSurface(Surface):
         z = dr.fma(z, r2, self.params['a8'])
         z = dr.fma(z, r2, self.params['a6'])
         z = dr.fma(z, r2, self.params['a4'])
+        
+        # # dimensional version
+        # safe_sqr = dr.clamp(1 - (1 + self.params['K']) * dr.sqr(self.params['c']) * r2, 0.0, dr.inf)
+        # z = dr.fma(z, r2, self.params['c'] * dr.rcp(1 + dr.sqrt(safe_sqr)))
+        # z = dr.fma(z, -r2, self.params['z0'])
 
+        # dimensionless version
         safe_sqr = dr.clamp(1 - (1 + self.params['K']) * dr.sqr(self.params['c']) * r2, 0.0, dr.inf)
         z = dr.fma(z, r2, self.params['c'] * dr.rcp(1 + dr.sqrt(safe_sqr)))
-        # z = self.params['z0'] - r2 * z
-        z = dr.fma(z, -r2, self.params['z0'])
+        z = dr.fma(z, -self.radial_extent * r2, self.params['z0'])
         return z
 
     def compute_z_np(self, x_, y_):
@@ -298,8 +320,8 @@ class LensMaterial:
 class LensElement:
     def __init__(self, 
         element_id: int, 
-        # element sizes
-        radial_extent: float,
+        # # element sizes
+        # radial_extent: float,
         # shape parameters
         surface:  Surface,
         # material parameters
@@ -316,7 +338,7 @@ class LensElement:
         '''
 
         self.subdiv_level = N
-        self.radial_extent  = radial_extent
+        # self.radial_extent  = radial_extent
         self.id = element_id
         self.int_material = int_material
         self.ext_material = ext_material
@@ -334,11 +356,11 @@ class LensElement:
         '''
         V_lens, F_lens, V_ap, F_ap, ovs_mask = create_surface_geometry(
             N = self.subdiv_level,
-            r_element = self.radial_extent,
+            r_element = self.surface.radial_extent,
             compute_z = self.surface.compute_z_np,
-            c = self.surface.params['c'],
+            c = self.surface.get_curvature(),
             flip_normals = not(self.is_world_facing),
-            baffle_radius = 1.1 * self.radial_extent,
+            baffle_radius = 1.1 * self.surface.radial_extent,
         )
         
         lens_mesh   = create_mesh(V_lens, F_lens, f"lens{self.id}")
@@ -510,7 +532,7 @@ class LensElement:
         # surface whenever the latter's axial position is modified
 
         lens_ovs_z = self.surface.compute_z_dr(
-            self.radial_extent, 
+            self.surface.radial_extent, 
             mi.Float(0.0)) * dr.ones(mi.Float, dr.width(self.initial_baffle_vertices))
 
         # update the baffle vertices' z-positions
@@ -545,8 +567,8 @@ class LensElement:
 class ApertureElement:
     def __init__(self, 
         element_id: int, 
-        # element sizes
-        radial_extent: float,
+        # # element sizes
+        # radial_extent: float,
         # shape parameters
         surface:  Surface,
         # meshing parameters
@@ -560,7 +582,7 @@ class ApertureElement:
         '''
 
         self.subdiv_level = N
-        self.radial_extent  = radial_extent
+        # self.radial_extent  = radial_extent
         self.id = element_id
         self.surface = surface
         self.param_keys_to_opt_keys = None
@@ -575,7 +597,7 @@ class ApertureElement:
         '''
         _, _, V_ap, F_ap, _ = create_surface_geometry(
             N = self.subdiv_level,
-            r_element = self.radial_extent,
+            r_element = self.surface.radial_extent,
             compute_z = self.surface.compute_z_np,
             c = 0.0,
             flip_normals = not(self.is_world_facing),
@@ -675,7 +697,7 @@ class ApertureElement:
         # surface whenever the latter's axial position is modified
 
         lens_ovs_z = self.surface.compute_z_dr(
-            self.radial_extent, 
+            self.surface.radial_extent, 
             mi.Float(0.0)) * dr.ones(mi.Float, dr.width(self.initial_baffle_vertices))
 
         # update the aperture vertices' z-positions
@@ -714,13 +736,13 @@ def matrix2f_inverse(A: mi.Matrix2f):
 class LensSystem:
     def __init__(self, 
                  surfaces: tp.List[Surface], 
-                 radial_extents: tp.List[float],
+                #  radial_extents: tp.List[float],
                  materials: tp.List [LensMaterial],
                  aperture_index: int = None,
                  ):
 
-        if not (len(radial_extents) == len(surfaces)):
-            raise AssertionError(f"Radii and surface lists do not match: {len(radial_extents)=}, {len(surfaces)=}")
+        # if not (len(radial_extents) == len(surfaces)):
+        #     raise AssertionError(f"Radii and surface lists do not match: {len(radial_extents)=}, {len(surfaces)=}")
         
         if not (len(materials) == len(surfaces) - 1):
             raise AssertionError(f"Material and surface lists do not match: {len(materials)=}, {len(surfaces)=}")
@@ -743,7 +765,7 @@ class LensSystem:
             elem = LensElement(
                 N=7,
                 element_id = len(elements),
-                radial_extent = radial_extents[idx],
+                # radial_extent = radial_extents[idx],
                 surface = surfaces[idx],
                 ext_material=materials[idx],
                 int_material=materials[next_mat_idx],
@@ -755,7 +777,7 @@ class LensSystem:
         self.elements = elements
         self.rear_z = elements[0].surface.params['z0']
         self.front_z = elements[-1].surface.params['z0']
-        self.front_radial_extent = radial_extents[-1]
+        self.front_radial_extent = elements[-1].surface.radial_extent
         self.materials = materials
         self.aperture_index = aperture_index
 
@@ -784,7 +806,8 @@ class LensSystem:
                 z_curr = self.elements[idx].surface.params['z0']
             
             thickness = z_curr - z_prev
-            curvature = -self.elements[idx].surface.params['c']
+            curvature = -self.elements[idx].surface.get_curvature()
+            # print(self.elements[idx].surface.radial_extent / self.elements[idx].surface.params['c'])
             ior_i = self.materials[idx].params['ior']
             ior_f = self.materials[next_mat_idx].params['ior']
             m10 = -(ior_f - ior_i) * curvature / ior_f
@@ -848,7 +871,7 @@ class LensSystem:
             z_prev = self.elements[idx - 1].surface.params['z0']
             z_curr = self.elements[idx].surface.params['z0']
             thickness = z_curr - z_prev
-            curvature = -self.elements[idx].surface.params['c']
+            curvature = -self.elements[idx].surface.get_curvature()
             ior_i = self.materials[idx].params['ior']
             ior_f = self.materials[next_mat_idx].params['ior']
             m10 = -(ior_f - ior_i) * curvature / ior_f
@@ -915,7 +938,7 @@ class LensSystem:
         z_entrance = self.elements[-1].surface.params['z0'] - \
             self.pupil_front_matrix[0,1] / self.pupil_front_matrix[1,1]
         
-        ap_radius = self.elements[self.aperture_index].radial_extent
+        ap_radius = self.elements[self.aperture_index].surface.radial_extent
         r_exit = ap_radius / self.pupil_rear_matrix[0,0]
         r_entrance = ap_radius / self.pupil_front_matrix[1,1]
         
@@ -940,6 +963,10 @@ class LensSystem:
         # focal length condition sets the curvature of the rear element surface
         surf_c = -(dr.rcp(f) + C) * dr.rcp((C * (z2 - surf_z0) + D) * (1 - k))
 
+        # convert curvature to nondimensional, since we are assigning its value directly
+        # to the LensElement.Surface
+        radial_extent = self.elements[0].surface.radial_extent
+        surf_c *= radial_extent
         surf_params = { 'c': surf_c, 'z0': surf_z0 }
 
         return surf_params
@@ -1011,7 +1038,7 @@ class LensSystem:
         rmax = 0.0
         for element in self.elements:
             element.add_to_scene(scene_dict)
-            rmax = max(rmax, element.radial_extent)
+            rmax = max(rmax, element.surface.radial_extent)
 
         # add a box around the lens elements and baffles
         zmax = self.front_z * 1.1
@@ -1112,7 +1139,7 @@ class LensSystem:
         is_new_elem = False
 
         def draw_surface(elem: LensElement, outwards=True):
-            xs = np.linspace(0, elem.radial_extent, N)
+            xs = np.linspace(0, elem.surface.radial_extent, N)
             if not(outwards):
                 xs = xs[::-1]
             ys = np.zeros_like(xs)
@@ -1160,12 +1187,12 @@ class LensSystem:
 def __eval_focal_lengths_singlet(c0, c1):
     surf0 = { 'c': c0, 'K': 0.0, 'z0': 2.5 }
     surf1 = { 'c': c1,  'K': 0.0, 'z0': 2.8 }
-    surf0 = ConicSurface(**surf0)
-    surf1 = ConicSurface(**surf1)
+    surf0 = ConicSurface(radial_extent=0.8, **surf0)
+    surf1 = ConicSurface(radial_extent=0.8, **surf1)
     surfaces = [surf0, surf1]
-    radial_extents = [0.8 for _ in surfaces]
+    # radial_extents = [0.8 for _ in surfaces]
     materials = [LensMaterial("nbk7", 1.5047, 64.17)]
-    lens_system = LensSystem(surfaces, radial_extents, materials)
+    lens_system = LensSystem(surfaces, materials)
     bfl = lens_system.compute_BFL().numpy().item()
     ffl = lens_system.compute_FFL().numpy().item()
     return np.array([bfl, ffl])
@@ -1196,13 +1223,13 @@ def __eval_focal_lengths_cooke():
     ]
     for surf in surfs:
         surf['c'] = 1.0 / surf['c']
-    surfaces = [ConicSurface(K=0, **surf) for surf in surfs]
-    radial_extents = [5.0 for _ in surfaces]
+    surfaces = [ConicSurface(radial_extent=5.0, K=0, **surf) for surf in surfs]
+    # radial_extents = [5.0 for _ in surfaces]
     air = LensMaterial("air")
     sk16 = LensMaterial("sk16", 1.62041, 60.32)
     f4 = LensMaterial("f4", 1.616592, 36.63)
     materials = [sk16, air, f4, air, sk16]
-    lens_system = LensSystem(surfaces, radial_extents, materials)
+    lens_system = LensSystem(surfaces, materials)
     efl = lens_system.compute_EFL().numpy().item()
     print("BFL matches image plane: ", lens_system.compute_BFL(), surfs[0]['z0'])
     return np.array([efl])
@@ -1219,13 +1246,13 @@ def __eval_focal_lengths_petzval():
     ]
     for surf in surfs:
         surf['c'] = 1.0 / surf['c']
-    surfaces = [ConicSurface(K=0, **surf) for surf in surfs]
-    radial_extents = [0.8 for _ in surfaces]
+    surfaces = [ConicSurface(radial_extent=0.8, K=0, **surf) for surf in surfs]
+    # radial_extents = [0.8 for _ in surfaces]
     air = LensMaterial("air")
     k7 = LensMaterial("k7", 1.51112, 60.41)
     f2 = LensMaterial("f2", 1.62004, 36.37)
     materials = [f2, k7, air, f2, k7]
-    lens_system = LensSystem(surfaces, radial_extents, materials)
+    lens_system = LensSystem(surfaces, materials)
     efl = lens_system.compute_EFL().numpy().item()
     print("BFL matches image plane: ", lens_system.compute_BFL(), surfs[0]['z0'])
     return np.array([efl])
