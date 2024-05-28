@@ -315,8 +315,12 @@ class LensInterface {
             return oss.str();
         }
 
-        virtual std::vector<Point3f> draw_surface(int num_points, bool start_from_axis) const {
-            std::vector<Point3f> points = {};
+        virtual void draw_surface(std::vector<Point3f> &points, std::vector<Normal3f> &normals, int num_points, bool start_from_axis) const {
+            points.clear();
+            normals.clear();
+        // virtual std::tuple<std::vector<Point3f>, std::vector<Normal3f>> draw_surface(int num_points, bool start_from_axis) const {
+        //     std::vector<Point3f> points = {};
+        //     std::vector<Normal3f> normals = {};
             Float radius = 0.f;
             for (int i = 0; i < num_points; ++i) {
                 if (start_from_axis) {
@@ -331,9 +335,11 @@ class LensInterface {
                 // TODO?
                 // assert(si.is_valid());
                 Point3f p_intersect = si.p;
+                Normal3f normal = si.n;
                 points.push_back(p_intersect);
+                normals.push_back(normal);
             }
-            return points;
+            // return { points, normals };
         }
 
         std::string get_left_material() const {
@@ -378,7 +384,7 @@ class SpheroidLens final : public LensInterface<Float, Spectrum> {
 
             // if discriminant is negative, no intersection
             Mask active = discriminant >= Float(0.0);
-            if (dr::none_or<false>(active)) {       // TODO: this is how early exit is handled in `interaction.h`
+            if (dr::none_or<false>(active)) {
                 return si;
             }
 
@@ -387,7 +393,7 @@ class SpheroidLens final : public LensInterface<Float, Spectrum> {
             Float far_t = center_proj + sqrt_disc;
 
             active &= far_t >= Float(0.0);
-            if (dr::none_or<false>(active)) {       // TODO: this is how early exit is handled in `interaction.h`
+            if (dr::none_or<false>(active)) {
                 return si;
             }
 
@@ -527,8 +533,11 @@ class ApertureStop final : public PlanoLens<Float, Spectrum> {
 
         // overridden method for drawing the aperture: draw the *negation* of the
         // element area (i.e. lines' extent is [R, R + t] rather than [0, R])
-        std::vector<Point3f> draw_surface(int num_points, bool start_from_axis) const override {
-            std::vector<Point3f> points = {};
+        virtual void draw_surface(std::vector<Point3f> &points, std::vector<Normal3f> &normals, int num_points, bool start_from_axis) const override {
+            points.clear();
+            normals.clear();
+            // std::vector<Point3f> points = {};
+            // std::vector<Point3f> normals = {};
             Float radius = 0.f;
             Float stop_radius = PlanoLens<Float, Spectrum>::m_element_radius;
             for (int i = 0; i < num_points; ++i) {
@@ -544,8 +553,9 @@ class ApertureStop final : public PlanoLens<Float, Spectrum> {
                 // assert(si.is_valid());
                 Point3f p_intersect = si.p;
                 points.push_back(p_intersect);
+                normals.push_back(si.n);
             }
-            return points;
+            // return { points, normals };
         }
 
         std::string to_string() const override {
@@ -564,17 +574,22 @@ template <typename Float, typename Spectrum>
 class AsphericalLens final : public LensInterface<Float, Spectrum> {
     public:
         MI_IMPORT_TYPES()
-        AsphericalLens(Float curvature, Float kappa, Float element_radius, Float z0, std::vector<Float> ai,
+        AsphericalLens(Float curvature_radius, Float kappa, Float element_radius, Float z0, std::vector<Float> ai,
         DispersiveMaterial<Float, Spectrum> left_material, DispersiveMaterial<Float, Spectrum> right_material) : 
         LensInterface<Float, Spectrum>(element_radius, z0, left_material, right_material), 
         m_K(kappa) { 
             // curvature and [ai] are in units of millimeters; rescale using `m_r_scale` (mm),
             // which is `element_radius` converted from (m) -> (mm)
-            m_r_scale = 1000.0f * element_radius;
-            m_c = curvature * m_r_scale;
+            
+            float MM_TO_METERS = 0.001f;
+
+            // m_r_scale = 1000.0f * element_radius;
+            m_r_scale = 1.0f / MM_TO_METERS * element_radius;
+            m_c = m_r_scale * dr::rcp(curvature_radius);
+            // m_c = element_radius * dr::rcp(curvature_radius);
             m_ai.reserve(ai.size());
             for (size_t i = 0; i < ai.size(); ++i) {
-                m_ai.push_back(dr::pow(m_r_scale, 2 * i + 3) * ai[i]);
+                m_ai.push_back(dr::pow(m_r_scale, 2 * i + 3) * ai.at(i));
             }
         }
 
@@ -587,14 +602,14 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             si.time = ray.time;
             si.wavelengths = ray.wavelengths;
 
+            // try to compute an initial guess for the asphere intersection by intersecting
+            // against the conic surface
             auto [t, valid] = intersect_conic(ray);
 
-            // // LOGGING
-            // std::cout << t << ", " << valid << "\n";
-
+            // if the conic intersection doesn't work, intersect with the plane `z = z_intercept` instead
             if (dr::none_or<false>(valid)) {
-                // std::cout << "A\n";
-                return si;
+                // std::cout << valid << "A\n";
+                t = (LensInterface<Float, Spectrum>::m_z_intercept - ray.o.z()) * dr::rcp(ray.d.z());
             }
 
             Point3f p_curr = ray(t);
@@ -608,15 +623,29 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             // compute asphere intersection using newton's method
             while(loop(active)) {
                 // build tangent plane on the asphere
-                Point3f plane_p(p_curr.x(), p_curr.y(), eval_asph(r2_curr));
+
+                // dr::resume_grad<Float> scope(true, r2_curr);
+                // std::cout << dr::grad_enabled(r2_curr) << std::endl;
+                // dr::enable_grad(r2_curr);
+                // dr::set_grad(r2_curr, 1.0);
+                // std::cout << dr::grad_enabled(r2_curr) << std::endl;
+                Float z_asph = eval_asph(r2_curr);
+                // dr::forward_to(z_asph);
+                // Float z_grad = dr::grad(z_asph);
+                // dr::disable_grad(r2_curr, z_asph);
+                // std::cout << dr::grad_enabled(r2_curr) << ", " << dr::grad_enabled(z_asph) << std::endl;
+
+                Point3f plane_p(p_curr.x(), p_curr.y(), z_asph);
                 err = dr::abs(p_curr.z() - plane_p.z());
 
-                Float z_grad = eval_asph_grad(r2_curr);
-                Vector2f radial(p_curr.x(), p_curr.y());
-                Float norm_sq = dr::squared_norm(radial);
-                radial = dr::select(norm_sq >= 4.f * dr::Epsilon<Float>, 
-                                    radial * dr::rsqrt(norm_sq), Vector2f(0.0f));
-                Normal3f plane_n(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
+                // Float z_grad = eval_asph_grad(r2_curr);
+                // Vector2f radial(p_curr.x(), p_curr.y());
+                // Float norm_sq = dr::squared_norm(radial);
+                // radial = dr::select(norm_sq >= 4.f * dr::Epsilon<Float>, 
+                //                     radial * dr::rsqrt(norm_sq), Vector2f(0.0f));
+                // Normal3f plane_n(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
+                Normal3f plane_n = normal(p_curr);
+
 
                 // intersect ray with tangent plane
                 t = dr::dot(plane_n, plane_p - ray.o) / dr::dot(plane_n, ray.d);
@@ -640,8 +669,9 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
                 return si;
             }
 
+            active &= t > 0.0f;
+
             Point3f p_surface = ray(t);
-            // convert ray length from millimeters back to meters
             si.t = t;
             si.p = p_surface;
             si.n = normal(p_surface);
@@ -653,13 +683,21 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
         }
 
         Normal3f normal(const Point3f &p) const override {
-            Vector2f radial(p.x(), p.y());
-            Float r2 = dr::squared_norm(radial);
-            radial = dr::select(r2 >= 4.f * dr::Epsilon<Float>, 
-                                radial * dr::rsqrt(r2), Vector2f(0.0f));
-            Float z_grad = eval_asph_grad(r2);
+            Vector2f radial(p.x() * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius), 
+                            p.y() * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius));
+            Float r2_ = dr::squared_norm(radial);
+            radial = dr::select(r2_ >= 4.f * dr::Epsilon<Float>, 
+                                radial * dr::rsqrt(r2_), Vector2f(0.0f));
+            Float z_grad = _eval_asph_grad(r2_);
             Normal3f normal(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
             return dr::normalize(normal);
+            // Vector2f radial(p.x(), p.y());
+            // Float r2 = dr::squared_norm(radial);
+            // radial = dr::select(r2 >= 4.f * dr::Epsilon<Float>, 
+            //                     radial * dr::rsqrt(r2), Vector2f(0.0f));
+            // Float z_grad = eval_asph_grad(r2);
+            // Normal3f normal(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
+            // return dr::normalize(normal);
         }
 
         void offset_along_axis(Float delta) override {
@@ -694,7 +732,7 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             Float cr = m_c * r_;
             Float sqr_term = 1.f - (1.f + m_K) * dr::sqr(cr);
             Float dz_ = cr * dr::rsqrt(sqr_term);
-            return dz_; // * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius);
+            return dz_;
         }
 
         // Evaluate the asphere polynomial using Horner's method
@@ -718,80 +756,109 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             }
             z_ *= r2_ * r_;
             z_ += _eval_conic_grad(r_);
-            return z_ * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius);
+            return -z_;      // TODO: + or -?
         }
+
+        // unitless version of eval_asph_grad; the input r2_ is unitless
+        Float _eval_asph_grad(Float r2_) const {
+            Float r_ = dr::sqrt(r2_);
+            Float z_ = 0.f;
+            for (int i = m_ai.size() - 1; i >= 0; --i) {
+                z_ = dr::fmadd(z_, r2_, (2.f * i + 4.f) * m_ai.at(i));
+            }
+            z_ *= r2_ * r_;
+            z_ += _eval_conic_grad(r_);
+            return -z_;
+        }
+
+
+
+        Float _test_asph_grad_fd(Float r, float delta=0.0001f) const {
+            Float f = eval_asph(dr::sqr(r));
+            Float r_dr = r + delta * r;
+            Float f_dr = eval_asph(dr::sqr(r_dr));
+            Float grad_fd = (f_dr - f) * dr::rcp(delta * r);
+            Float grad_an = eval_asph_grad(dr::sqr(r));
+            return dr::abs(grad_fd - grad_an);
+        }
+
+        void _test_asph_grad() const {
+            Float r = 0.1f * LensInterface<Float, Spectrum>::m_element_radius;
+
+            std::cout << "FD test begin.\n";
+
+            // logspace(-8, 0, 50)
+            std::vector<float> eps_list = {
+                1.00000000e-8, 1.45634848e-8, 2.12095089e-8, 3.08884360e-8,
+                4.49843267e-8, 6.55128557e-8, 9.54095476e-8, 1.38949549e-7,
+                2.02358965e-7, 2.94705170e-7, 4.29193426e-7, 6.25055193e-7,
+                9.10298178e-7, 1.32571137e-6, 1.93069773e-6, 2.81176870e-6,
+                4.09491506e-6, 5.96362332e-6, 8.68511374e-6, 1.26485522e-5,
+                1.84206997e-5, 2.68269580e-5, 3.90693994e-5, 5.68986603e-5,
+                8.28642773e-5, 1.20679264e-4, 1.75751062e-4, 2.55954792e-4,
+                3.72759372e-4, 5.42867544e-4, 7.90604321e-4, 1.15139540e-3,
+                1.67683294e-3, 2.44205309e-3, 3.55648031e-3, 5.17947468e-3,
+                7.54312006e-3, 1.09854114e-2, 1.59985872e-2, 2.32995181e-2,
+                3.39322177e-2, 4.94171336e-2, 7.19685673e-2, 1.04811313e-1,
+                1.52641797e-1, 2.22299648e-1, 3.23745754e-1, 4.71486636e-1,
+                6.86648845e-1, 1.00000000e+0};
+
+            for (size_t i = 0; i < eps_list.size(); ++i) {
+                std::cout << _test_asph_grad_fd(r, eps_list.at(i)) << ", ";
+            }
+            
+            std::cout << "\nFD test complete." << std::endl;
+        }
+
 
         std::tuple<Float, Mask> intersect_conic(const Ray3f& ray) const {
             Vector3f o = ray.o - Vector3f(0.f, 0.f, LensInterface<Float, Spectrum>::m_z_intercept),
                      d = ray.d;
-            
-            // Float A = m_c * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius) * (1.f + m_K * dr::sqr(d.z())),
-            //       B = 2.f * (m_c * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius) * (dr::dot(o, d) +  m_K * o.z() * d.z()) - d.z()),
-            //       C = m_c * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius) * (dr::squared_norm(o) + m_K * dr::sqr(o.z())) - 2.f * o.z();
+
+            Float R = LensInterface<Float, Spectrum>::m_element_radius;
+            o *= dr::rcp(R);
+
             Float A = m_c * (1.f + m_K * dr::sqr(d.z())),
-                  B = 2.f * (m_c * (dr::dot(o, d) +  m_K * o.z() * d.z()) - d.z() * LensInterface<Float, Spectrum>::m_element_radius),
-                  C = m_c * (dr::squared_norm(o) + m_K * dr::sqr(o.z())) - 2.f * o.z() * LensInterface<Float, Spectrum>::m_element_radius;
+                  B = 2.f * (m_c * (dr::dot(o, d) +  m_K * o.z() * d.z()) - d.z()),
+                  C = m_c * (dr::squared_norm(o) + m_K * dr::sqr(o.z())) - 2.f * o.z();
             
-            // auto [valid, t0, t1] = math::solve_quadratic(A, B, C);
+            auto [valid, t0, t1] = math::solve_quadratic(A, B, C);
 
-
-            Vector3f bigO(o.x(), o.y(), o.z() * dr::sqrt(1.0f + m_K));
-            Vector3f bigD(d.x(), d.y(), d.z() * dr::sqrt(1.0f + m_K));
-            Float curv = m_c * LensInterface<Float, Spectrum>::m_element_radius;
-
-
-
-            /* Is this perhaps a linear equation? */
-            Mask linear_case = dr::eq(A, 0.0f);
-
-            /* If so, we require b != 0 */
-            Mask valid_linear = linear_case && dr::neq(B, 0.0f);
-
-            /* Initialize solution with that of linear equation */
-            Float x0, x1;
-            x0 = x1 = -C / B;
-
-            /* Check if the quadratic equation is solvable */
-            Float discrim = dr::fmsub(B, B, 4.0f * A * C);
-            // Float discrim = -dr::squared_norm(dr::cross(bigO * curv, bigD)) + dr::sqr(d.z()) + 2.0f * curv * dr::dot(bigD, bigD * o.z() - bigO * d.z());
-            Mask valid_quadratic = !linear_case && (discrim >= 0.0f);
-
-            if (likely(dr::any_or<true>(valid_quadratic))) {
-                Float sqrt_discrim = dr::sqrt(discrim);
-
-                /* Numerically stable version of (-b (+/-) sqrt_discrim) / (2 * a)
-                *
-                * Based on the observation that one solution is always
-                * accurate while the other is not. Finds the solution of
-                * greater magnitude which does not suffer from loss of
-                * precision and then uses the identity x1 * x2 = c / a
-                */
-                Float temp = -0.5f * (B + dr::copysign(sqrt_discrim, B));
-
-                Float x0p = temp / A,
-                    x1p = C / temp;
-
-                /* Order the results so that x0 < x1 */
-                Float x0m = dr::minimum(x0p, x1p),
-                    x1m = dr::maximum(x0p, x1p);
-
-                x0 = dr::select(linear_case, x0, x0m);
-                x1 = dr::select(linear_case, x0, x1m);
+            // if valid == false, discriminant is negative and ray misses the real+virtual 
+            // surfaces completely. return invalid
+            if (dr::none(valid)) {
+                return {t0, valid};
             }
 
-            Mask valid = valid_linear || valid_quadratic;
-            Float t0 = x0, t1 = x1;
+            t0 *= R;
+            t1 *= R;
 
+            // test each root to see whether it lies on the real surface
+            Float t0_ztest = m_c * (ray.o.z() + t0 * ray.d.z() - LensInterface<Float, Spectrum>::m_z_intercept),
+                  t1_ztest = m_c * (ray.o.z() + t1 * ray.d.z() - LensInterface<Float, Spectrum>::m_z_intercept);
 
+            Mask t0_valid = valid & (t0_ztest > 0.0f),
+                 t1_valid = valid & (t1_ztest > 0.0f);
 
+            t0_valid &= t0_ztest <= dr::select(m_K > -1.0f, R * dr::rcp(1.0f + m_K), dr::Infinity<Float>);
+            t1_valid &= t1_ztest <= dr::select(m_K > -1.0f, R * dr::rcp(1.0f + m_K), dr::Infinity<Float>);
 
+            // to have a valid solution, at least one root must be on the real surface
+            valid &= (t0_valid | t1_valid);
 
+            // if neither root is valid, both lie on the virtual surface.
+            // reject them and return invalid
+            if (dr::none(valid)) {
+                return {t0, valid};
+            }
 
-
-
-
-
-            return { dr::select(t0 > 0.f, t0, t1), valid };
+            // if both roots are on the valid surface, take the closest non-negative one
+            if (dr::any(t0_valid & t1_valid)) {
+                return {dr::select(t0 > 0.0f, t0, t1), valid};
+            }
+        
+            // if only one root is valid, pick the valid one
+            return {dr::select(t0_valid, t0, t1), valid};
         }
 };
 
@@ -807,17 +874,6 @@ public:
     MI_IMPORT_TYPES()
 
     RealisticLensCamera(const Properties &props) : Base(props) {
-        // ScalarVector2i size = m_film->size();
-        // m_x_fov = (ScalarFloat) parse_fov(props, size.x() / (double) size.y());
-
-
-        // m_aperture_radius = props.get<ScalarFloat>("aperture_radius");
-
-        // if (dr::all(dr::eq(m_aperture_radius, 0.f))) {
-        //     Log(Warn, "Can't have a zero aperture radius -- setting to %f", dr::Epsilon<Float>);
-        //     m_aperture_radius = dr::Epsilon<Float>;
-        // }
-
         if (m_to_world.scalar().has_scale())
             Throw("Scale factors in the camera-to-world transformation are not allowed!");
 
@@ -856,6 +912,12 @@ public:
             build_double_gauss_smith(object_distance);
         } else if (lens_type == "asph") {
             build_asph_lens(object_distance);
+        } else if (lens_type == "exp1a") {
+            build_doublet_exp1_uncorr();
+        } else if (lens_type == "exp1b") {
+            build_doublet_exp1_corr();
+        } else if (lens_type == "exp1c") {
+            build_doublet_exp1_exact();
         } else {
             build_thin_lens(object_distance, focal_length, lens_diameter / 2);
         }
@@ -876,114 +938,6 @@ public:
                                 << pupil_bound.max.x() << ", " << pupil_bound.max.y() << "\n";
             render_exit_pupil(r_pupil, wv, 1 << 20);
         }
-
-
-        // Interaction3f it(0.f, 0.f, Wavelength(0.f), Point3f(0.321f, -0.321f, 1.f), Normal3f(0.f, 0.f, 1.f));
-        // Point2f sample(0.46f, 0.52f);
-        // Mask active = true;
-        // auto [ds, importance] = sample_direction(it, sample, active);
-        // std::cout << "Sample: " << ds.uv << ", importance: " << importance << "\n";
-    }
-
-    void loop_v1(float xmin = 0.0f, float xmax = 0.005f, size_t N = 6) const {
-        float dx = (xmax - xmin) / ((float) N - 1.f);
-
-        for (size_t i = 0; i < N; ++i) {
-            Vector3f o(i * dx, 0.f, -1.f);
-            Vector3f d(0.f, 0.f, 1.f);
-            Ray3f ray = Ray3f(o, d, 0.0f, Wavelength(589.3f));
-            draw_ray_from_film(ray);
-        }
-        std::cout << std::endl;
-    }
-
-    void loop_v2(float xmin = 0.0f, float xmax = 0.005f, size_t N = 6) const {
-        // auto [nodes, weights] = quad::gauss_legendre<FloatX>(res);
-        // dr::zeros<Float>(dr::width(wi));
-        // auto [nodes_x, nodes_y]     = dr::meshgrid(nodes, nodes);
-        // using FloatP = dr::Packet<dr::scalar_t<Float>>;
-        // using Normal3fP = Normal<FloatP, 3>;
-        // using Vector3fP = Vector<FloatP, 3>;
-
-        /* Floats and packets of floats */
-        using ScalarFloat = dr::scalar_t<Float>;
-        using FloatX = dr::DynamicArray<ScalarFloat>;
-
-        /* 2D vectors and static/dynamic packets of 2D vectors */
-        using Vector2f  = dr::Array<ScalarFloat, 2>;
-        using Vector2fX = dr::Array<FloatX, 2>;
-
-        /* 3D vectors and static/dynamic packets of 3D vectors */
-        using Vector3f  = dr::Array<ScalarFloat, 3>;
-        using Vector3fX = dr::Array<FloatX, 3>;
-
-        /* rays and static/dynamic packets of rays */
-        using Ray3f     = Ray<Vector3f, Spectrum>;
-        using Ray3fX    = Ray<Vector3fX, Spectrum>;
-
-        // this appears to be the right set of types, but our methods don't wanna accept them
-        // anyway, the vectorization procedure is much more involved than expected: it's not 
-        // just replacing the scalar inputs with vector ones. refer to Integrator::render() in
-        // integrator.cpp for details - you still have to call parallel_for() (CPU) or split
-        // computation into threadblocks (GPU)
-        auto xs = dr::linspace<FloatX>(xmin, xmax, N);
-        std::cout << xs << std::endl;
-        Vector3fX points = Vector3fX(xs, xs, xs);
-        std::cout << points << std::endl;
-
-        // Vector3fX o(xs, 0.f, -1.f);
-        // Vector3fX d(dr::zeros<FloatX>(N), 0.f, 1.f);
-
-        // // based on integrator.cpp, scalar inputs for `time` and `wavelength_sample` should be
-        // // correct
-        
-        // Ray3fX rays(o, d, 0.0f, Wavelength(589.3f));
-
-        // // none of these work
-
-        // draw_ray_from_film(ray);
-        // dr::vectorize([](auto &&ray) { return trace_ray_from_film(ray); }, ray);
-        // auto [rays_out, mask] = trace_ray_from_film(rays);
-        // sample_ray(0.0f, 0.0f, Vector2fX(xs, xs), Vector2fX(xs,xs), true);
-    }
-
-    void loop_v3() {
-        // `Float` version of DynamicBuffer - this works fine
-        std::vector<Float> points = {
-            Float(0.f),
-            Float(5.f),
-            Float(2.f),
-            Float(4.f),
-            Float(3.f),
-        };
-
-        DynamicBuffer<Float> p = dr::load<DynamicBuffer<Float>>(points.data(), 5);
-        size_t i = 3;
-        Float x0 = dr::gather<Float>(p, i);
-
-        std::cout << x0 << std::endl;
-
-        // // ==============================================================
-        // // `Point2f` version of DynamicBuffer - this doesn't work
-        // std::vector<Point2f> points = {
-        //     Point2f(0.f,0.f),
-        //     Point2f(5.f,1.f),
-        //     Point2f(2.f,3.f),
-        //     Point2f(4.f,7.f),
-        //     Point2f(0.f,1.f),
-        // };
-
-        // DynamicBuffer<Point2f> p = dr::load<DynamicBuffer<Point2f>>(points.data(), points.size() * 2);
-        // size_t i = 3;
-        
-        // // compilation error when doing gather() on vector types
-        // // Point2f x0 = dr::gather<Point2f>(p, i); 
-
-        // Point2f x0 = Point2f(
-        //     dr::gather<Float>(p, 2*i + 0),
-        //     dr::gather<Float>(p, 2*i + 1));
-
-        // std::cout << x0 << std::endl;
     }
 
 
@@ -1611,8 +1565,8 @@ public:
         Float thickness, curv_radius, elem_radius;
 
         for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii[i];
-            thickness   = thicknesses[i];
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
             z_pos += thickness;
             if (i == aperture_index) {
                 m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
@@ -1620,13 +1574,13 @@ public:
                     0.001f * z_pos, 
                     air));
             } else {
-                curv_radius = curv_radii[i];
+                curv_radius = curv_radii.at(i);
                 m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
                     -0.001f * curv_radius, 
                     0.001f * elem_radius, 
                     0.001f * z_pos, 
-                    mats[i + 1], 
-                    mats[i]));
+                    mats.at(i + 1), 
+                    mats.at(i)));
             }
         }
 
@@ -1691,8 +1645,8 @@ public:
         Float thickness, curv_radius, elem_radius;
 
         for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii[i];
-            thickness   = thicknesses[i];
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
             z_pos += thickness;
             if (i == aperture_index) {
                 m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
@@ -1700,13 +1654,13 @@ public:
                     0.001f * z_pos, 
                     air));
             } else {
-                curv_radius = curv_radii[i];
+                curv_radius = curv_radii.at(i);
                 m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
                     -0.001f * curv_radius, 
                     0.001f * elem_radius, 
                     0.001f * z_pos, 
-                    mats[i + 1], 
-                    mats[i]));
+                    mats.at(i + 1), 
+                    mats.at(i)));
             }
         }
 
@@ -1765,8 +1719,8 @@ public:
         Float thickness, curv_radius, elem_radius;
 
         for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii[i];
-            thickness   = thicknesses[i];
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
             z_pos += thickness;
             if (i == aperture_index) {
                 m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
@@ -1774,13 +1728,13 @@ public:
                     0.001f * z_pos, 
                     air));
             } else {
-                curv_radius = curv_radii[i];
+                curv_radius = curv_radii.at(i);
                 m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
                     -0.001f * curv_radius, 
                     0.001f * elem_radius, 
                     0.001f * z_pos, 
-                    mats[i + 1], 
-                    mats[i]));
+                    mats.at(i + 1), 
+                    mats.at(i)));
             }
         }
 
@@ -1799,173 +1753,262 @@ public:
     }
 
 
+    void build_doublet_exp1_uncorr() {
+        DispersiveMaterial<Float, Spectrum> air = 
+            DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> glass_A = 
+            DispersiveMaterial<Float, Spectrum>("glass_A", 1.504655967792f, 0.004217312592f);
+        DispersiveMaterial<Float, Spectrum> glass_B = 
+            DispersiveMaterial<Float, Spectrum>("glass_B", 1.629550507808f, 0.005261032175f);
+
+        int num_elements = 4;
+        int aperture_index = 0;
+        std::vector<float> curv_radii  = {1000.0f, 24.00000000f, -24.00000000f, -168.01068267f};
+        std::vector<float> thicknesses = {0.0f, 3.00000000f, 2.25291824f, 46.74708176f};
+        std::vector<float> elem_radii  = {8.0f, 8.00000000f, 8.00000000f, 8.00000000f};
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
+            air,
+            air,
+            glass_A,
+            glass_B,
+            air,
+        };
+
+        Float z_pos = 0.0f;
+        Float thickness, curv_radius, elem_radius;
+
+        for (int i = num_elements - 1; i >= 0; i--) {
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
+            z_pos += thickness;
+            if (i == aperture_index) {
+                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    air));
+            } else {
+                curv_radius = curv_radii.at(i);
+                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
+                    -0.001f * curv_radius, 
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    mats.at(i + 1), 
+                    mats.at(i)));
+            }
+        }
+
+        // draw_cross_section(16);
+
+        m_rear_element_z = m_interfaces.front()->get_z();
+        m_rear_element_radius = m_interfaces.front()->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+    }
+
+
+    void build_doublet_exp1_corr() {
+        DispersiveMaterial<Float, Spectrum> air = 
+            DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> glass_A = 
+            DispersiveMaterial<Float, Spectrum>("glass_A", 1.504655967792f, 0.004217312592f);
+        DispersiveMaterial<Float, Spectrum> glass_B = 
+            DispersiveMaterial<Float, Spectrum>("glass_B", 1.616532564163f, 0.009781867266f);
+
+        int num_elements = 4;
+        int aperture_index = 0;
+        std::vector<float> curv_radii  = {1000.0f, 24.00000000f, -24.00000000f, -168.01068267f};
+        std::vector<float> thicknesses = {0.0f, 3.00000000f, 2.25291824f, 46.74708176f};
+        std::vector<float> elem_radii  = {8.0f, 8.00000000f, 8.00000000f, 8.00000000f};
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
+            air,
+            air,
+            glass_A,
+            glass_B,
+            air,
+        };
+
+        Float z_pos = 0.0f;
+        Float thickness, curv_radius, elem_radius;
+
+        for (int i = num_elements - 1; i >= 0; i--) {
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
+            z_pos += thickness;
+            if (i == aperture_index) {
+                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    air));
+            } else {
+                curv_radius = curv_radii.at(i);
+                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
+                    -0.001f * curv_radius, 
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    mats.at(i + 1), 
+                    mats.at(i)));
+            }
+        }
+
+        // draw_cross_section(16);
+
+        m_rear_element_z = m_interfaces.front()->get_z();
+        m_rear_element_radius = m_interfaces.front()->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+    }
+
+
+    void build_doublet_exp1_exact() {
+        DispersiveMaterial<Float, Spectrum> air = 
+            DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> glass_A = 
+            DispersiveMaterial<Float, Spectrum>("glass_A", 1.504655967792f, 0.004217312592f);
+        DispersiveMaterial<Float, Spectrum> glass_B = 
+            DispersiveMaterial<Float, Spectrum>("glass_B", 1.616364225128f, 0.009840291768f);
+
+        int num_elements = 4;
+        int aperture_index = 0;
+        std::vector<float> curv_radii  = {1000.0f, 24.00000000f, -24.00000000f, -168.01068267f};
+        std::vector<float> thicknesses = {0.0f, 3.00000000f, 2.25291824f, 46.74708176f};
+        std::vector<float> elem_radii  = {8.0f, 8.00000000f, 8.00000000f, 8.00000000f};
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
+            air,
+            air,
+            glass_A,
+            glass_B,
+            air,
+        };
+
+        Float z_pos = 0.0f;
+        Float thickness, curv_radius, elem_radius;
+
+        for (int i = num_elements - 1; i >= 0; i--) {
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
+            z_pos += thickness;
+            if (i == aperture_index) {
+                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    air));
+            } else {
+                curv_radius = curv_radii.at(i);
+                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
+                    -0.001f * curv_radius, 
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    mats.at(i + 1), 
+                    mats.at(i)));
+            }
+        }
+
+        // draw_cross_section(16);
+
+        m_rear_element_z = m_interfaces.front()->get_z();
+        m_rear_element_radius = m_interfaces.front()->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+    }
+
+
     void build_asph_lens(Float object_distance) {
         // Parameters from:
         // https://patents.google.com/patent/US8934179B2/en
-        // TODO: input materials
 
         DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
-        DispersiveMaterial<Float, Spectrum> NLAK9 = 
-            DispersiveMaterial<Float, Spectrum>("NLAK9", 
-            Vector3f(1.462319050, 0.344399589, 1.155083720), 
-            Vector3f(0.007242702, 0.0243353131, 85.46868680));
+        DispersiveMaterial<Float, Spectrum> glass_A = DispersiveMaterial<Float, Spectrum>("glass_A", 1.5206352150873f, 0.004988523354517577f);
+        DispersiveMaterial<Float, Spectrum> glass_B = DispersiveMaterial<Float, Spectrum>("glass_B", 1.5949533129576456f, 0.013907192818823239f);
+        DispersiveMaterial<Float, Spectrum> glass_C = DispersiveMaterial<Float, Spectrum>("glass_C", 1.5048569450665132f, 0.004216973209068582f);
+
+        // size_t num_elements = 13;
+        // int aperture_index = 0;
+        // std::vector<float> curv_radii  = { 1e8, 1.754f, -5.259f, 18.175f, 2.111f, 49.667f, 9.971f, 3.479f, 21.778f, 2.402f, 1.334f, 1e8, 1e8 };
+        // std::vector<float> thicknesses = { -0.225f, 0.655f, 0.025f, 0.27f, 0.35f, 0.516f, 0.187f, 0.605f, 0.573f, 0.8f, 0.3f, 0.3f, 0.607f };
+        // std::vector<float> elem_radii  = { 0.89f, 1.026181818f, 1.026181818f, 1.026181818f, 1.026181818f, 1.211636364f, 1.211636364f, 1.446545455f, 1.557818182f, 1.842181818f, 2.373818182f, 2.670545455f, 2.670545455f };
+        // std::vector<float> kappas  = { 0.0f, -1.898E+00, -1.818E+00, 0.000E+00, -2.723E-01, 0.000E+00, 3.438E+00, -3.702E+01, -3.345E+04, -1.855E+01, -4.858E+00, 0.0f, 0.0f };
+        size_t num_elements = 12;
+        int aperture_index = -1;
+        std::vector<float> curv_radii  = { 1.754f, -5.259f, 18.175f, 2.111f, 49.667f, 9.971f, 3.479f, 21.778f, 2.402f, 1.334f, 1e8, 1e8 };
+        std::vector<float> thicknesses = { 0.655f, 0.025f, 0.27f, 0.35f, 0.516f, 0.187f, 0.605f, 0.573f, 0.8f, 0.3f, 0.3f, 0.607f };
+        // std::vector<float> elem_radii  = { 1.026181818f, 1.026181818f, 1.026181818f, 1.026181818f, 1.211636364f, 1.211636364f, 1.446545455f, 1.557818182f, 1.842181818f, 2.373818182f, 2.670545455f, 2.670545455f };
+        std::vector<float> elem_radii  = { 0.89f, 1.026181818f, 1.026181818f, 1.026181818f, 1.211636364f, 1.211636364f, 1.446545455f, 1.557818182f, 1.842181818f, 2.373818182f, 2.670545455f, 2.670545455f };
+        std::vector<float> kappas  = { -1.898E+00, -1.818E+00, 0.000E+00, -2.723E-01, 0.000E+00, 3.438E+00, -3.702E+01, -3.345E+04, -1.855E+01, -4.858E+00, 0.0f, 0.0f };
+
+        std::vector<std::vector<Float>> ai_list = {
+            // { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // aperture
+            { 3.822E-02, -2.809E-02,  4.970E-02, -5.149E-02,  4.628E-03,  4.215E-03, -3.450E-03 },
+            { 1.288E-01, -1.343E-01,  1.978E-02,  3.399E-04, -6.173E-04, -5.735E-04,  8.520E-12 },
+            { 4.814E-02,  6.037E-02, -1.838E-01,  1.217E-01, -1.665E-02, -5.234E-04,  2.394E-04 },
+            { -8.944E-02,  2.532E-01, -3.068E-01,  2.175E-01, -5.539E-02,  3.281E-03, -6.552E-07 },
+            { -1.060E-01,  5.779E-02,  1.251E-03, -3.017E-02,  6.065E-02, -1.536E-02, -2.048E-03 },
+            { -1.142E-01, -2.103E-02,  7.808E-03,  2.283E-02,  5.590E-05, -1.053E-03, -1.525E-04 },
+            { 5.323E-02, -7.412E-02, -1.800E-02,  1.682E-02,  4.538E-03, -2.738E-03, -1.886E-05 },
+            { -3.596E-02, 9.066E-02, -1.026E-01,  4.108E-02, -5.778E-03, -5.187E-05, -6.175E-06 },
+            { -1.503E-01, 4.478E-02, -7.829E-03, -1.119E-03, 2.461E-04, 0.000E+00, 0.000E+00 },
+            { -9.165E-02, 4.113E-02, -1.389E-02, 2.647E-03, -2.445E-04, 3.564E-06, 6.120E-07 },
+            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // plano-lenses
+            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }    // plano-lenses
+        };
+
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
+            // air,
+            air,
+            glass_A,
+            air,
+            glass_B,
+            air,
+            glass_A,
+            air,
+            glass_A,
+            air,
+            glass_A,
+            air,
+            glass_C,
+            air,
+        };
+
+        std::cout << "Array sizes match: " 
+            << (curv_radii.size() == num_elements) << ", "
+            << (thicknesses.size() == num_elements) << ", "
+            << (elem_radii.size() == num_elements) << ", "
+            << (kappas.size() == num_elements) << ", "
+            << (ai_list.size() == num_elements) << ", "
+            << (mats.size() == num_elements + 1) << "\n";
+
+
 
         Float z_pos = 0.0f;
-        Float t;
-
-        Float c, K, elem_diameter;
+        Float thickness, curv_radius, elem_radius, kappa;
         std::vector<Float> Ai;
-        auto mat1 = air, mat2 = air;
 
-        // surface12
-        t = 0.607f;
-        z_pos += t;
+        for (int i = num_elements - 1; i >= 0; i--) {
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
+            z_pos += thickness;
+            if (i == aperture_index) {
+                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    air));
+            } else {
+                curv_radius = curv_radii.at(i);
+                kappa = kappas.at(i);
+                Ai = ai_list.at(i);
+                m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(
+                    curv_radius, 
+                    kappa,
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    Ai,
+                    mats.at(i + 1), 
+                    mats.at(i)));
+            }
+        }
 
-        elem_diameter = 5.341090909f;
-        mat1 = air;
-        mat2 = NLAK9;
-
-        m_interfaces.push_back(new PlanoLens<Float, Spectrum>(0.5f * 0.001f * elem_diameter, 0.001f * z_pos, mat1, mat2));
-
-        // surface11
-        t = 0.3f;
-        z_pos += t;
-
-        elem_diameter = 5.341090909f;
-        mat1 = NLAK9;
-        mat2 = air;
-
-        m_interfaces.push_back(new PlanoLens<Float, Spectrum>(0.5f * 0.001f * elem_diameter, 0.001f * z_pos, mat1, mat2));
-
-        // surface10
-        t = 0.3f;
-        z_pos += t;
-
-        c = 0.749625187f;
-        K = -4.858f;
-        Ai = { -9.165E-02, 4.113E-02, -1.389E-02, 2.647E-03, -2.445E-04, 3.564E-06, 6.120E-07 };
-        elem_diameter = 4.747636364f;
-        mat1 = air;
-        mat2 = NLAK9;
-
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface9
-        t = 0.8f;
-        z_pos += t;
-
-        c = 0.416319734f;
-        K = -1.855E+01;
-        Ai = { -1.503E-01, 4.478E-02, -7.829E-03, -1.119E-03, 2.461E-04, 0.000E+00, 0.000E+00 };
-        elem_diameter = 3.684363636f;
-        mat1 = NLAK9;
-        mat2 = air;
-
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface8
-        t = 0.573f;
-        z_pos += t;
-
-        c = 0.045917899f;
-        K = -3.345E+04;
-        // K = -1.345E+04;
-        Ai = { -3.596E-02, 9.066E-02, -1.026E-01,  4.108E-02, -5.778E-03, -5.187E-05, -6.175E-06 };
-        elem_diameter = 3.115636364f;
-        mat1 = air;
-        mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface7
-        t = 0.605f;
-        z_pos += t;
-
-        c = 0.287438919f;
-        K = -3.702E+01;
-        Ai = { 5.323E-02, -7.412E-02, -1.800E-02,  1.682E-02,  4.538E-03, -2.738E-03, -1.886E-05 };
-        elem_diameter = 2.893090909f;
-        mat1 = NLAK9;
-        mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface6
-        t = 0.187f;
-        z_pos += t;
-
-        c = 0.100290843f;
-        K = 3.438E+00;
-        Ai = { -1.142E-01, -2.103E-02,  7.808E-03,  2.283E-02,  5.590E-05, -1.053E-03, -1.525E-04 };
-        elem_diameter = 2.423272727f;
-        mat1 = air;
-        mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface5
-        t = 0.516f;
-        z_pos += t;
-
-        c = 0.020134093f;
-        K = 0.000E+00;
-        Ai = { -1.060E-01,  5.779E-02,  1.251E-03, -3.017E-02,  6.065E-02, -1.536E-02, -2.048E-03 };
-        elem_diameter = 2.423272727f;
-        mat1 = NLAK9;
-        mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface4
-        t = 0.35f;
-        z_pos += t;
-
-        c = 0.473709143f;
-        K = -2.723E-01;
-        Ai = { -8.944E-02,  2.532E-01, -3.068E-01,  2.175E-01, -5.539E-02,  3.281E-03, -6.552E-07 };
-        elem_diameter = 2.052363636f;
-        mat1 = air;
-        mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface3
-        t = 0.27f;
-        z_pos += t;
-
-        c = 0.055020633;
-        K = 0.000E+00;
-        Ai = { 4.814E-02,  6.037E-02, -1.838E-01,  1.217E-01, -1.665E-02, -5.234E-04,  2.394E-04 };
-        elem_diameter = 2.052363636f;
-        mat1 = NLAK9;
-        mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface2
-        t = 0.025f;
-        z_pos += t;
-
-        c = -0.190150219;
-        K = -1.818E+00;
-        Ai = { 1.288E-01, -1.343E-01,  1.978E-02,  3.399E-04, -6.173E-04, -5.735E-04,  8.520E-12 };
-        elem_diameter = 2.052363636f;
-        mat1 = air;
-        mat2 = NLAK9;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-        // surface1
-        t = 0.655f;
-        z_pos += t;
-
-        c = 0.570125428;
-        K = -1.898E+00;
-        Ai = { 3.822E-02, -2.809E-02,  4.970E-02, -5.149E-02,  4.628E-03,  4.215E-03, -3.450E-03 };
-        elem_diameter = 2.052363636f;
-        mat1 = NLAK9;
-        mat2 = air;
-        m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(c, K, 0.5f * 0.001f * elem_diameter, 0.001f * z_pos, Ai, mat1, mat2));
-
-
-        draw_cross_section(16);
+        // draw_cross_section(16);
 
         Float delta = focus_thick_lens(object_distance);
+
         for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
+            interface->offset_along_axis(dr::select(dr::isnan(delta), 0.0f, -delta));
         }
 
         std::cout << "Fine focus adjustment: " << delta << std::endl;
@@ -1979,47 +2022,8 @@ public:
     std::tuple<Ray3f, Mask> trace_ray_from_film(const Ray3f &ray) const {
         Mask active = true;
         Ray3f curr_ray(ray);
-        // TODO: dr::loop method causes a segfault :(
-        // size_t lens_id = 0;
 
-        // dr::Loop<Mask> loop("trace", active, lens_id, curr_ray);
-        // std::cout << "======== NEW RAY ========" << std::endl;
-        // while(loop(active)) {
-        //     auto [next_ray, next_active] = m_interfaces.at(lens_id)->compute_interaction(curr_ray);
-        //     // curr_ray = next_ray;
-        //     // curr_ray = Ray3f(next_ray.o, next_ray.d, next_ray.maxt, next_ray.time, next_ray.wavelengths);
-        //     std::cout << "==== Index: " << lens_id << " ====\n";
-        //     // std::cout << curr_ray << ",\t";
-        //     std::cout << next_active << ",\t";
-        //     std::cout << next_ray << "\n\n";
-    
-        //     // std::cout << "B1\n";
-
-        //     curr_ray.o = next_ray.o;
-        //     curr_ray.d = next_ray.d;
-        //     curr_ray.maxt = next_ray.maxt;
-        //     curr_ray.time = next_ray.time;
-        //     curr_ray.wavelengths = next_ray.wavelengths;
-        //     // std::cout << "B2\n";
-        //     lens_id += 1;
-        //     // std::cout << "B3\n";
-        //     active &= next_active && (lens_id < m_interfaces.size());
-        //     // std::cout << "B4\n";
-        //     // active &= (lens_id < m_interfaces.size());
-        //     std::cout << "==== index complete ====\n";
-        // }
-        // std::cout << "======== END RAY ========" << std::endl;
-
-        // std::cout << "B5\n";
-
-        // std::cout << "======== NEW RAY ========" << std::endl;
         for (const auto &interface : m_interfaces) {
-            // TODO: is it better to mask?
-            // TODO: actually, replace this with a dr::loop! then while-loop through
-            // all the lens elements and add `&& active` to the conditional. rays that
-            // fail will terminate early and have active == false
-                        // ray_ = interface->compute_interaction(ray_, active);
-
             // std::cout << "==== Index: ====\n";
             auto [next_ray, next_active] = interface->compute_interaction(curr_ray);
 
@@ -2244,6 +2248,7 @@ public:
     void draw_cross_section(int num_points) const {
         size_t vtx_idx = 0;
         std::vector<Point3f> points = {};
+        std::vector<Normal3f> normals = {};
         std::vector<Point2i> edges = {};
         bool new_element;
 
@@ -2253,23 +2258,27 @@ public:
             bool right_is_air = string::to_lower(s->get_right_material()) == "air";
 
             std::vector<Point3f> p_list;
+            std::vector<Normal3f> n_list;
             if (left_is_air) {
                 // cases:
                 //  1. air->air interface; aperture
                 //  2. air->glass interface
                 new_element = true;
-                p_list = s->draw_surface(num_points, true);
+                // [p_list, n_list] = s->draw_surface(num_points, true);
+                s->draw_surface(p_list, n_list, num_points, true);
             } else {
                 // cases:
                 //  3. glass->air interface
                 //  4. glass->glass interface
                 new_element = false;
-                p_list = s->draw_surface(num_points, false);
+                // [p_list, n_list] = s->draw_surface(num_points, false);
+                s->draw_surface(p_list, n_list, num_points, false);
             }
 
             // add points to the output
             for (size_t i = 0; i < p_list.size(); ++i) {
                 points.push_back(p_list[i]);
+                normals.push_back(n_list[i]);
                 vtx_idx = points.size() - 1;
                 if (new_element && i == 0) {
                     continue;
@@ -2280,10 +2289,12 @@ public:
 
             // for glass-glass interface, draw the interface a second time
             if (!left_is_air && !right_is_air) {
-                p_list = s->draw_surface(num_points, true);
+                // [p_list, n_list] = s->draw_surface(num_points, true);
+                s->draw_surface(p_list, n_list, num_points, true);
                 new_element = true;
                 for (size_t i = 0; i < p_list.size(); ++i) {
                     points.push_back(p_list[i]);
+                    normals.push_back(n_list[i]);
                     vtx_idx = points.size() - 1;
                     if (new_element && i == 0) {
                         continue;
@@ -2299,10 +2310,16 @@ public:
             std::cout << p << ",\n";
         }
         std::cout << "]";
-        // print points and edges
+
         std::cout << "\n\nedges = [";
         for (const auto& e : edges) {
             std::cout << e << ",\n";
+        }
+        std::cout << "]";
+
+        std::cout << "\n\nnormals = [";
+        for (const auto& n : normals) {
+            std::cout << n << ",\n";
         }
         std::cout << "]";
 
@@ -2314,7 +2331,6 @@ public:
     std::tuple<Ray3f, Mask> trace_ray_from_world(const Ray3f &ray) const {
         Mask active = true;
         Ray3f curr_ray(ray);
-        // TODO: switch to dr::loop when trace_ray_from_film() issue is fixed
 
         // std::cout << "======== NEW RAY ========" << std::endl;
         for (int lens_id = m_interfaces.size() - 1; lens_id >= 0; lens_id--) {
@@ -2568,34 +2584,15 @@ public:
 
         m_sample_to_film = m_film_to_sample.inverse();
 
-        // TODO: deprecate the following
-
-        // m_camera_to_sample = perspective_projection(
-        //     m_film->size(), m_film->crop_size(), m_film->crop_offset(),
-        //     m_x_fov, Float(m_near_clip), Float(m_far_clip));
-
-        // m_sample_to_camera = m_camera_to_sample.inverse();
-
-        // // Position differentials on the near plane
-        // m_dx = m_sample_to_camera * Point3f(1.f / m_resolution.x(), 0.f, 0.f)
-        //      - m_sample_to_camera * Point3f(0.f);
-        // m_dy = m_sample_to_camera * Point3f(0.f, 1.f / m_resolution.y(), 0.f)
-        //      - m_sample_to_camera * Point3f(0.f);
-
-        /* Precompute some data for importance(). Please
-           look at that function for further details. */
         Point3f pmin(m_sample_to_film * Point3f(0.f, 0.f, 0.f)),
                 pmax(m_sample_to_film * Point3f(1.f, 1.f, 0.f));
 
         m_image_rect.reset();
-        // m_image_rect.expand(Point2f(pmin.x(), pmin.y()) / pmin.z());
-        // m_image_rect.expand(Point2f(pmax.x(), pmax.y()) / pmax.z());
         m_image_rect.expand(Point2f(pmin.x(), pmin.y()));
         m_image_rect.expand(Point2f(pmax.x(), pmax.y()));
         m_normalization = 1.f / m_image_rect.volume();
 
         dr::make_opaque(m_film_to_sample, m_sample_to_film, 
-                        // m_dx, m_dy, m_x_fov, 
                         m_image_rect, m_normalization);
     }
 
@@ -2704,60 +2701,6 @@ public:
 
         return { ray_out, wav_weight };
     }
-
-
-    // // NOTE: can we remove this and fallback to the default `sample_ray_differential()` implementation
-    // // in sensor.cpp?
-    // // TODO: figure out the stuff about `METHOD_NAME` vs `METHOD_NAME_impl`
-    // std::pair<RayDifferential3f, Spectrum>
-    // sample_ray_differential_impl(Float time, Float wavelength_sample,
-    //                              const Point2f &position_sample, const Point2f &aperture_sample,
-    //                              Mask active) const {
-    //     MI_MASKED_FUNCTION(ProfilerPhase::EndpointSampleRay, active);
-
-    //     auto [wavelengths, wav_weight] =
-    //         sample_wavelengths(dr::zeros<SurfaceInteraction3f>(),
-    //                            wavelength_sample,
-    //                            active);
-    //     RayDifferential3f ray;
-    //     ray.time = time;
-    //     ray.wavelengths = wavelengths;
-
-    //     // Compute the sample position on the near plane (local camera space).
-    //     Point3f film_p = m_sample_to_camera *
-    //                     Point3f(position_sample.x(), position_sample.y(), 0.f);
-
-    //     // Aperture position
-    //     Point2f tmp = m_aperture_radius * warp::square_to_uniform_disk_concentric(aperture_sample);
-    //     Point3f aperture_p(tmp.x(), tmp.y(), 0.f);
-
-    //     // Sampled position on the focal plane
-    //     Float f_dist = m_focus_distance / film_p.z();
-    //     Point3f focus_p   = film_p          * f_dist,
-    //             focus_p_x = (film_p + m_dx) * f_dist,
-    //             focus_p_y = (film_p + m_dy) * f_dist;
-
-    //     // Convert into a normalized ray direction; adjust the ray interval accordingly.
-    //     Vector3f d = dr::normalize(Vector3f(focus_p - aperture_p));
-
-    //     ray.o = m_to_world.value().transform_affine(aperture_p);
-    //     ray.d = m_to_world.value() * d;
-
-    //     Float inv_z = dr::rcp(d.z());
-    //     Float near_t = m_near_clip * inv_z,
-    //           far_t  = m_far_clip * inv_z;
-    //     ray.o += ray.d * near_t;
-    //     ray.maxt = far_t - near_t;
-
-    //     ray.o_x = ray.o_y = ray.o;
-
-    //     ray.d_x = m_to_world.value() * dr::normalize(Vector3f(focus_p_x - aperture_p));
-    //     ray.d_y = m_to_world.value() * dr::normalize(Vector3f(focus_p_y - aperture_p));
-    //     ray.has_differentials = true;
-
-    //     return { ray, wav_weight };
-    // }
-
 
     // This method is mitsuba's version of pbrt's Sample_Wi(), which in turn
     // is the sensor version of the emitters' Sample_Li(). Given some position p
@@ -2935,8 +2878,6 @@ private:
 
     void run_tests() {
         test_materials();
-        // TODO
-        // test_trace_ray_from_world(const Ray3f &ray);
     }
 };
 
