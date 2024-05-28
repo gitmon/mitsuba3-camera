@@ -332,14 +332,11 @@ class LensInterface {
 
                 Ray3f ray(Point3f(radius, 0.f, m_z_intercept - 1.f), Vector3f(0.f, 0.f, 1.f));
                 Interaction3f si = intersect(ray);
-                // TODO?
-                // assert(si.is_valid());
                 Point3f p_intersect = si.p;
                 Normal3f normal = si.n;
                 points.push_back(p_intersect);
                 normals.push_back(normal);
             }
-            // return { points, normals };
         }
 
         std::string get_left_material() const {
@@ -549,13 +546,10 @@ class ApertureStop final : public PlanoLens<Float, Spectrum> {
                 }
                 Ray3f ray(Point3f(radius, 0.f, PlanoLens<Float, Spectrum>::m_z_intercept - 1.0f), Vector3f(0.f, 0.f, 1.f));
                 Interaction3f si = this->intersect(ray);
-                // TODO?
-                // assert(si.is_valid());
                 Point3f p_intersect = si.p;
                 points.push_back(p_intersect);
                 normals.push_back(si.n);
             }
-            // return { points, normals };
         }
 
         std::string to_string() const override {
@@ -691,13 +685,6 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             Float z_grad = _eval_asph_grad(r2_);
             Normal3f normal(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
             return dr::normalize(normal);
-            // Vector2f radial(p.x(), p.y());
-            // Float r2 = dr::squared_norm(radial);
-            // radial = dr::select(r2 >= 4.f * dr::Epsilon<Float>, 
-            //                     radial * dr::rsqrt(r2), Vector2f(0.0f));
-            // Float z_grad = eval_asph_grad(r2);
-            // Normal3f normal(z_grad * radial.x(), z_grad * radial.y(), -1.0f);
-            // return dr::normalize(normal);
         }
 
         void offset_along_axis(Float delta) override {
@@ -756,7 +743,7 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             }
             z_ *= r2_ * r_;
             z_ += _eval_conic_grad(r_);
-            return -z_;      // TODO: + or -?
+            return -z_;
         }
 
         // unitless version of eval_asph_grad; the input r2_ is unitless
@@ -879,8 +866,8 @@ public:
 
         update_camera_transforms();
 
+        m_film_z_position = 0.0f;
         m_film_diagonal = dr::norm(m_film->get_physical_size());
-
         m_needs_sample_3 = true;
 
         run_tests();
@@ -910,6 +897,14 @@ public:
         } else if (lens_type == "gauss") {
             // build_double_gauss_laikin(object_distance);
             build_double_gauss_smith(object_distance);
+        } else if (lens_type == "hypercentric") {
+            // aperture radius in mm
+            Float aperture_size = props.get<Float>("ap_size", 1.0f); 
+            // aperture<->lens distance in units of focal lengths.
+            // telecentric optics: z = 1.0
+            // hypercentric optics: 1.0 < z <= 2.0
+            Float aperture_offset = props.get<Float>("ap_offset", 2.0f); 
+            build_hypercentric_lens(aperture_size, aperture_offset);
         } else if (lens_type == "asph") {
             build_asph_lens(object_distance);
         } else if (lens_type == "exp1a") {
@@ -1908,8 +1903,65 @@ public:
         m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
     }
 
+    void build_hypercentric_lens(Float ap_radius = 1.0f, Float focal_lengths = 2.0f) {
+        DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> SF6 = DispersiveMaterial<Float, Spectrum>("SF6", 1.757435971209294f, 0.016580283248837778f);
+
+        float target_img_size = 5.0f;      // desired image size
+
+        // design parameters for the primary lens (mm)
+        float lens_radius = 120.0f;
+        float focal_length = 210.0f;
+        float track_length = 450.0f;
+        float curvature_radius = 310.505660861f;
+        float lens_thickness = 50.0f;
+
+        Float z_ap_to_lens = focal_length * focal_lengths;
+        Float z_film_to_ap = z_ap_to_lens * (target_img_size - ap_radius) * dr::rcp(lens_radius + ap_radius);
+
+        size_t num_elements = 3;
+        int aperture_index = 2;
+        std::vector<Float> curv_radii  = { curvature_radius, -curvature_radius, dr::Infinity<Float> };
+        std::vector<Float> thicknesses = { lens_thickness, z_ap_to_lens - lens_thickness * 0.5f, z_film_to_ap };
+        std::vector<Float> elem_radii  = { lens_radius, lens_radius, ap_radius };
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = { air, SF6, air, air };
+
+        Float z_pos = 0.0f;
+        Float thickness, curv_radius, elem_radius;
+        for (int i = num_elements - 1; i >= 0; i--) {
+            elem_radius = elem_radii.at(i);
+            thickness   = thicknesses.at(i);
+            z_pos += thickness;
+            if (i == aperture_index) {
+                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    air));
+            } else {
+                curv_radius = curv_radii.at(i);
+                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
+                    -0.001f * curv_radius, 
+                    0.001f * elem_radius, 
+                    0.001f * z_pos, 
+                    mats.at(i + 1), 
+                    mats.at(i)));
+            }
+        }
+        m_film_z_position = 0.001f * (track_length - (thicknesses.at(0) + thicknesses.at(1) + thicknesses.at(2)));
+
+        // draw_cross_section(16);
+
+        Float shutter_time = dr::sqr(z_ap_to_lens * dr::rcp(ap_radius * (ap_radius + lens_radius)));
+        std::cout << "Recommended shutter time: " << shutter_time * 8.0f << "\n";
+
+        m_rear_element_z = m_interfaces.front()->get_z();
+        m_rear_element_radius = m_interfaces.front()->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+    }
+
 
     void build_asph_lens(Float object_distance) {
+        // TODO: find some way to deal with the weird aperture (it's currently excluded)
         // Parameters from:
         // https://patents.google.com/patent/US8934179B2/en
 
@@ -2667,8 +2719,7 @@ public:
         // std::cout << "F\n";
 
         // Convert ray_out from camera to world space
-        // dr::masked(ray_out, active) = m_to_world.value() * ray_out;
-        // ray_out = m_to_world.value() * ray_out;
+        ray_out.o.z() += m_film_z_position;
         ray_out.o = m_to_world.value().transform_affine(ray_out.o);
         ray_out.d = m_to_world.value() * d_out_local;
         // ------------------------
@@ -2696,6 +2747,7 @@ public:
             wav_weight *= ProjectiveCamera<Float,Spectrum>::shutter_open_time() * 
                             bounds_area * dr::rcp(dr::sqr(m_rear_element_z));
         } else {
+            // TODO: I think this needs to be normalized by the bounds area too
             wav_weight *= cos4t;
         }
 
@@ -2850,6 +2902,8 @@ private:
     std::vector<LensInterface<Float, Spectrum>*> m_interfaces;
     Float m_rear_element_z, m_rear_element_radius, m_lens_terminal_z;
     ref<RadicalInverse> m_qmc_sampler;
+
+    Float m_film_z_position;
 
     bool m_sample_exit_pupil;
 
