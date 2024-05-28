@@ -1,8 +1,7 @@
 '''
 NOTE: all units are in millimeters!
 TODO's: 
-    - 2d visualization might be nice (need intersect() code for `Surface`)
-    - optimization: per-variable masks and learning rates
+    - optimization: per-variable learning rates
 '''
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,6 +43,11 @@ class Surface:
         '''
         return self.params['c'] / self.radial_extent    # unitless quantity divided by length
     
+    def get_z0(self):
+        return self.params['z0']
+    
+    def get_radial_extent(self):
+        return self.radial_extent
     # def intersect(self, ray: mi.Ray3f):
     #     raise NotImplementedError()
 
@@ -249,15 +253,17 @@ class LensMaterial:
             # 'V_d': mi.ScalarFloat(abbe_number),
         }
         self.param_keys_to_opt_keys = None
-        self.active_optvars = [key for key, _ in self.params.items()]
 
+        if name == "air":
+            self.active_optvars = []
+        else:
+            self.active_optvars = [key for key, _ in self.params.items()]
 
     def remove_optvar(self, param_name: str):
         try:
             self.active_optvars.remove(param_name)
         except ValueError:
             print(f"Warning: {param_name} was not found in optvar list!")
-            pass
 
 
     def remove_optvars(self, params_to_disable: tp.List[str]):
@@ -292,8 +298,6 @@ class LensMaterial:
             else:
                 optimizer[optvar_key] = mi.Float(param_value)
                 self.param_keys_to_opt_keys[param_name] = optvar_key
-                # TODO: add ability to select only some variables to optimize
-    
             # TODO: handle per-variable learning rates
 
 
@@ -320,8 +324,6 @@ class LensMaterial:
 class LensElement:
     def __init__(self, 
         element_id: int, 
-        # # element sizes
-        # radial_extent: float,
         # shape parameters
         surface:  Surface,
         # material parameters
@@ -338,7 +340,6 @@ class LensElement:
         '''
 
         self.subdiv_level = N
-        # self.radial_extent  = radial_extent
         self.id = element_id
         self.int_material = int_material
         self.ext_material = ext_material
@@ -471,8 +472,6 @@ class LensElement:
             else:
                 optimizer[optvar_key] = mi.Float(value)
                 self.param_keys_to_opt_keys[var_name] = optvar_key
-                # TODO: add ability to select only some variables to optimize
-    
             # TODO: handle per-variable learning rates
 
         # BSDF/material handling
@@ -553,7 +552,6 @@ class LensElement:
             self.active_optvars.remove(param_name)
         except ValueError:
             print(f"Warning: {param_name} was not found in optvar list!")
-            pass
 
     def remove_optvars(self, params_to_disable: tp.List[str]):
         active_optvars = [var for var in self.active_optvars if var not in params_to_disable]
@@ -567,8 +565,6 @@ class LensElement:
 class ApertureElement:
     def __init__(self, 
         element_id: int, 
-        # # element sizes
-        # radial_extent: float,
         # shape parameters
         surface:  Surface,
         # meshing parameters
@@ -582,7 +578,6 @@ class ApertureElement:
         '''
 
         self.subdiv_level = N
-        # self.radial_extent  = radial_extent
         self.id = element_id
         self.surface = surface
         self.param_keys_to_opt_keys = None
@@ -736,14 +731,10 @@ def matrix2f_inverse(A: mi.Matrix2f):
 class LensSystem:
     def __init__(self, 
                  surfaces: tp.List[Surface], 
-                #  radial_extents: tp.List[float],
                  materials: tp.List [LensMaterial],
                  aperture_index: int = None,
                  ):
 
-        # if not (len(radial_extents) == len(surfaces)):
-        #     raise AssertionError(f"Radii and surface lists do not match: {len(radial_extents)=}, {len(surfaces)=}")
-        
         if not (len(materials) == len(surfaces) - 1):
             raise AssertionError(f"Material and surface lists do not match: {len(materials)=}, {len(surfaces)=}")
         
@@ -765,7 +756,6 @@ class LensSystem:
             elem = LensElement(
                 N=7,
                 element_id = len(elements),
-                # radial_extent = radial_extents[idx],
                 surface = surfaces[idx],
                 ext_material=materials[idx],
                 int_material=materials[next_mat_idx],
@@ -807,7 +797,6 @@ class LensSystem:
             
             thickness = z_curr - z_prev
             curvature = -self.elements[idx].surface.get_curvature()
-            # print(self.elements[idx].surface.radial_extent / self.elements[idx].surface.params['c'])
             ior_i = self.materials[idx].params['ior']
             ior_f = self.materials[next_mat_idx].params['ior']
             m10 = -(ior_f - ior_i) * curvature / ior_f
@@ -946,6 +935,8 @@ class LensSystem:
     
     def get_rear_surface_params(self, f):
         '''
+        Modify the rear surface's curvature and axial position to i) constrain the lens system's
+        overall focal length, and ii) ensure it is focused at the film plane.
         Input: 
             - f: float. Desired effective focal length in mm.
         '''
@@ -1132,7 +1123,7 @@ class LensSystem:
             element.initialize_geometry(output_dir)
 
 
-    def draw_cross_section(self, N):
+    def draw_cross_section(self, N, label: str = None, color='k', fig = None, **kwargs):
         cs_edges = []
         cs_points = []
         idx_offset = 0
@@ -1177,20 +1168,58 @@ class LensSystem:
             
         cs_points = np.concatenate(cs_points)
         cs_edges = np.array(cs_edges)
-        plt.figure()
-        plot_cross_section_2d(cs_points, cs_edges, color='k')
+
+        # if label is None:
+        #     label = "Lens"
+        if fig == None:
+            plt.figure()
+        plot_cross_section_2d(cs_points, cs_edges, color=color, label=label, **kwargs)
         cs_points[:,0] *= -1
-        plot_cross_section_2d(cs_points, cs_edges, color='k')
+        plot_cross_section_2d(cs_points, cs_edges, color=color, label=label, **kwargs)
+        handles, labels = plt.gca().get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        plt.legend(by_label.values(), by_label.keys(), loc='lower right')
         return plt.gcf()
+    
+    def print(self):
+        print("\n====== Materials ======")
+        for i, mat in enumerate(reversed(self.materials)):
+            if mat.name == "air":
+                A, B = 1.000277, 0.0
+            else:
+                A, B = abbe_to_cauchy(mat.params['ior'], mat.params['V_d'])
+                A = np.array(A).item()
+                B = np.array(B).item()
+            print(f"mat[{i}]: {A:.12f}f, {B:.12f}f")
+
+        print("\n====== Geometry ======")
+        curvature_radii = [1.0 / e.surface.get_curvature() for e in self.elements]
+        z0s = [0] + [e.surface.get_z0() for e in self.elements]
+        thicknesses = [z0s[i + 1] - z0s[i] for i in range(len(self.elements))]
+        extents = [e.surface.get_radial_extent() for e in self.elements]
+
+        for lst in (curvature_radii, thicknesses, extents):
+            for i in range(len(lst)):
+                lst[i] = np.array(lst[i]).item()
+
+        print("r_c:", ", ".join(["{:.8f}".format(x) + "f" for x in  curvature_radii[::-1]]))
+        print("  t:", ", ".join(["{:.8f}".format(x) + "f" for x in      thicknesses[::-1]]))
+        print("r_e:", ", ".join(["{:.8f}".format(x) + "f" for x in          extents[::-1]]))
+
+
+def abbe_to_cauchy(nd, Vd, lbdas=[0.5893, 0.48613, 0.65627]):
+    lbda_D, lbda_F, lbda_C = lbdas
+    B = (nd - 1) / (Vd * (lbda_F ** -2 - lbda_C ** -2))
+    A = nd - B * lbda_D ** -2
+    return A, B
 
 
 def __eval_focal_lengths_singlet(c0, c1):
-    surf0 = { 'c': c0, 'K': 0.0, 'z0': 2.5 }
-    surf1 = { 'c': c1,  'K': 0.0, 'z0': 2.8 }
-    surf0 = ConicSurface(radial_extent=0.8, **surf0)
-    surf1 = ConicSurface(radial_extent=0.8, **surf1)
+    surf0 = { 'radial_extent': 0.8, 'c': c0, 'K': 0.0, 'z0': 2.5 }
+    surf1 = { 'radial_extent': 0.8, 'c': c1,  'K': 0.0, 'z0': 2.8 }
+    surf0 = ConicSurface(**surf0)
+    surf1 = ConicSurface(**surf1)
     surfaces = [surf0, surf1]
-    # radial_extents = [0.8 for _ in surfaces]
     materials = [LensMaterial("nbk7", 1.5047, 64.17)]
     lens_system = LensSystem(surfaces, materials)
     bfl = lens_system.compute_BFL().numpy().item()
@@ -1214,17 +1243,16 @@ def test_focal_lengths_singlet():
 def __eval_focal_lengths_cooke():
     # NOTE: curvature data are transcribed as radii and inverted later
     surfs = [
-        { 'c': -17.285, 'z0': 42.95 },
-        { 'c': 141.25,  'z0': 44.95 },
-        { 'c': 19.3,    'z0': 50.95 },
-        { 'c': -20.25,  'z0': 51.95 },
-        { 'c': -158.65, 'z0': 57.95 },
-        { 'c': 21.25,   'z0': 59.95 },
+        { 'radial_extent': 5.0, 'c': -17.285, 'z0': 42.95 },
+        { 'radial_extent': 5.0, 'c': 141.25,  'z0': 44.95 },
+        { 'radial_extent': 5.0, 'c': 19.3,    'z0': 50.95 },
+        { 'radial_extent': 5.0, 'c': -20.25,  'z0': 51.95 },
+        { 'radial_extent': 5.0, 'c': -158.65, 'z0': 57.95 },
+        { 'radial_extent': 5.0, 'c': 21.25,   'z0': 59.95 },
     ]
     for surf in surfs:
         surf['c'] = 1.0 / surf['c']
-    surfaces = [ConicSurface(radial_extent=5.0, K=0, **surf) for surf in surfs]
-    # radial_extents = [5.0 for _ in surfaces]
+    surfaces = [ConicSurface(K=0, **surf) for surf in surfs]
     air = LensMaterial("air")
     sk16 = LensMaterial("sk16", 1.62041, 60.32)
     f4 = LensMaterial("f4", 1.616592, 36.63)
@@ -1237,17 +1265,16 @@ def __eval_focal_lengths_cooke():
 def __eval_focal_lengths_petzval():
     # NOTE: curvature data are transcribed as radii and inverted later
     surfs = [
-        { 'c': -188.1, 'z0': 20.4 },
-        { 'c': -22.1,  'z0': 22.4 },
-        { 'c': 28.42,  'z0': 28.9 },
-        { 'c': np.inf, 'z0': 64.67 },
-        { 'c': -37.87, 'z0': 66.67 },
-        { 'c': 36.27,  'z0': 72.67 },
+        { 'radial_extent': 0.8, 'c': -188.1, 'z0': 20.4 },
+        { 'radial_extent': 0.8, 'c': -22.1,  'z0': 22.4 },
+        { 'radial_extent': 0.8, 'c': 28.42,  'z0': 28.9 },
+        { 'radial_extent': 0.8, 'c': np.inf, 'z0': 64.67 },
+        { 'radial_extent': 0.8, 'c': -37.87, 'z0': 66.67 },
+        { 'radial_extent': 0.8, 'c': 36.27,  'z0': 72.67 },
     ]
     for surf in surfs:
         surf['c'] = 1.0 / surf['c']
-    surfaces = [ConicSurface(radial_extent=0.8, K=0, **surf) for surf in surfs]
-    # radial_extents = [0.8 for _ in surfaces]
+    surfaces = [ConicSurface(K=0, **surf) for surf in surfs]
     air = LensMaterial("air")
     k7 = LensMaterial("k7", 1.51112, 60.41)
     f2 = LensMaterial("f2", 1.62004, 36.37)
