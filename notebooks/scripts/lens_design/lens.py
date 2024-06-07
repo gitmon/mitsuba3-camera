@@ -21,7 +21,7 @@ import meshplot as mp
 from igl import read_triangle_mesh
 from os.path import join
 
-baffle_radius = 5.0
+# baffle_radius = 5.0
 
 class Surface:
     def __init__(self, radial_extent: float, params: dict):
@@ -60,6 +60,9 @@ class ConicSurface(Surface):
             'z0': z0,
         }
         super().__init__(radial_extent, params)
+
+    def get_kappa(self):
+        return self.params['K']
 
     def compute_z_dr(self, x, y):
         ''' 
@@ -189,6 +192,21 @@ class EvenAsphericSurface(Surface):
         }
         super().__init__(radial_extent, params)
 
+    def get_kappa(self):
+        return self.params['K']
+
+    def get_aspheric_coefficients(self):
+        ai = [
+            self.params['a4'] *  self.radial_extent ** -3,
+            self.params['a6'] *  self.radial_extent ** -5,
+            self.params['a8'] *  self.radial_extent ** -7,
+            self.params['a10'] * self.radial_extent ** -9,
+            self.params['a12'] * self.radial_extent ** -11,
+            self.params['a14'] * self.radial_extent ** -13,
+            self.params['a16'] * self.radial_extent ** -15,
+        ]
+        return ai
+
     def compute_z_dr(self, x, y):
         ''' 
         Compute the sag function (z-coord) of a conic surface at the radial 
@@ -197,15 +215,14 @@ class EvenAsphericSurface(Surface):
 
         This version of the function consumes and outputs `mi.Float` arrays.
         '''
-        r2 = dr.sqr(x) + dr.sqr(y)
-        r2 *= dr.rcp(dr.sqr(self.radial_extent))
+        r2_ = (dr.sqr(x) + dr.sqr(y)) * dr.rcp(dr.sqr(self.radial_extent))
         z = self.params['a16']
-        z = dr.fma(z, r2, self.params['a14'])
-        z = dr.fma(z, r2, self.params['a12'])
-        z = dr.fma(z, r2, self.params['a10'])
-        z = dr.fma(z, r2, self.params['a8'])
-        z = dr.fma(z, r2, self.params['a6'])
-        z = dr.fma(z, r2, self.params['a4'])
+        z = dr.fma(z, r2_, self.params['a14'])
+        z = dr.fma(z, r2_, self.params['a12'])
+        z = dr.fma(z, r2_, self.params['a10'])
+        z = dr.fma(z, r2_, self.params['a8'])
+        z = dr.fma(z, r2_, self.params['a6'])
+        z = dr.fma(z, r2_, self.params['a4'])
         
         # # dimensional version
         # safe_sqr = dr.clamp(1 - (1 + self.params['K']) * dr.sqr(self.params['c']) * r2, 0.0, dr.inf)
@@ -213,9 +230,10 @@ class EvenAsphericSurface(Surface):
         # z = dr.fma(z, -r2, self.params['z0'])
 
         # dimensionless version
-        safe_sqr = dr.clamp(1 - (1 + self.params['K']) * dr.sqr(self.params['c']) * r2, 0.0, dr.inf)
-        z = dr.fma(z, r2, self.params['c'] * dr.rcp(1 + dr.sqrt(safe_sqr)))
-        z = dr.fma(z, -self.radial_extent * r2, self.params['z0'])
+        safe_sqr = dr.clamp(1 - (1 + self.params['K']) * dr.sqr(self.params['c']) * r2_, 0.0, dr.inf)
+        # print(safe_sqr)
+        z = dr.fma(z, r2_, self.params['c'] * dr.rcp(1 + dr.sqrt(safe_sqr)))
+        z = dr.fma(z, -self.radial_extent * r2_, self.params['z0'])
         return z
 
     def compute_z_np(self, x_, y_):
@@ -297,6 +315,7 @@ class LensMaterial:
                 raise KeyError(f"Variable {optvar_key} already exists in optimizer!")
             else:
                 optimizer[optvar_key] = mi.Float(param_value)
+                # optimizer[optvar_key] = mi.ScalarFloat(param_value)
                 self.param_keys_to_opt_keys[param_name] = optvar_key
             # TODO: handle per-variable learning rates
 
@@ -471,6 +490,7 @@ class LensElement:
                 raise KeyError(f"Variable {optvar_key} already exists in optimizer!")
             else:
                 optimizer[optvar_key] = mi.Float(value)
+                # optimizer[optvar_key] = mi.ScalarFloat(value)
                 self.param_keys_to_opt_keys[var_name] = optvar_key
             # TODO: handle per-variable learning rates
 
@@ -596,7 +616,7 @@ class ApertureElement:
             compute_z = self.surface.compute_z_np,
             c = 0.0,
             flip_normals = not(self.is_world_facing),
-            baffle_radius = baffle_radius,
+            baffle_radius = 1.1 * self.surface.radial_extent,
         )
         
         ap_mesh = create_mesh(V_ap, F_ap, f"baffle{self.id}")
@@ -609,7 +629,7 @@ class ApertureElement:
             self.ap_fname = ap_fname
 
 
-    def meshplot_geometry(self, p_ = None, lens_c = np.array([0,1,1]), **kwargs) -> None:
+    def meshplot_geometry(self, p_ = None, lens_c = np.array([0,1,1]), baffle_c = None, **kwargs) -> None:
         '''
         Visualize the lens geometry using Meshplot.
         '''
@@ -671,6 +691,7 @@ class ApertureElement:
                 raise KeyError(f"Variable {optvar_key} already exists in optimizer!")
             else:
                 optimizer[optvar_key] = mi.Float(value)
+                # optimizer[optvar_key] = mi.ScalarFloat(value)
                 self.param_keys_to_opt_keys[var_name] = optvar_key
 
     def save_init_state(self, params: mi.SceneParameters):
@@ -693,7 +714,7 @@ class ApertureElement:
 
         lens_ovs_z = self.surface.compute_z_dr(
             self.surface.radial_extent, 
-            mi.Float(0.0)) * dr.ones(mi.Float, dr.width(self.initial_baffle_vertices))
+            mi.Float(0.0)) * dr.ones(mi.Float, dr.width(self.initial_ap_vertices))
 
         # update the aperture vertices' z-positions
         new_ap_pos = mi.Point3f(
@@ -738,8 +759,11 @@ class LensSystem:
         if not (len(materials) == len(surfaces) - 1):
             raise AssertionError(f"Material and surface lists do not match: {len(materials)=}, {len(surfaces)=}")
         
-        if aperture_index is None:
-            aperture_index = -1
+        if aperture_index is None or aperture_index < 0:
+            self.has_aperture = False
+            aperture_index = len(surfaces) - 1
+        else:
+            self.has_aperture = True
 
         # initialize materials. From film->world, the first material in the lens 
         # system is always "air". 
@@ -748,19 +772,29 @@ class LensSystem:
         num_materials = len(materials)
 
         elements = []
+        SUBDIV_LEVELS = 7
         for idx in range(len(surfaces)):
             # the element's int/ext materials are set by looking at the current and next
             # materials in the list. For the last element, we wrap the `next` material back
             # to material[0] (air).
             next_mat_idx = (idx + 1) % num_materials
-            elem = LensElement(
-                N=7,
-                element_id = len(elements),
-                surface = surfaces[idx],
-                ext_material=materials[idx],
-                int_material=materials[next_mat_idx],
-                is_world_facing = False,
-            )
+            # TODO XXXXX: this will break the cooke triplet, probably
+            if self.has_aperture and idx == aperture_index:
+                elem = ApertureElement(
+                    N=SUBDIV_LEVELS,
+                    element_id = len(elements),
+                    surface = surfaces[idx],
+                    is_world_facing = False,
+                )
+            else:
+                elem = LensElement(
+                    N=SUBDIV_LEVELS,
+                    element_id = len(elements),
+                    surface = surfaces[idx],
+                    ext_material=materials[idx],
+                    int_material=materials[next_mat_idx],
+                    is_world_facing = False,
+                )
 
             elements.append(elem)
 
@@ -963,7 +997,10 @@ class LensSystem:
         return surf_params
 
     def size(self):
-        return len(self.elements)
+        if self.has_aperture:
+            return len(self.elements) - 1
+        else:
+            return len(self.elements)
 
     def save_init_state(self, params: mi.SceneParameters):
         for element in self.elements:
@@ -1138,6 +1175,10 @@ class LensSystem:
             return points
 
         for surface_id in range(len(self.elements)):
+            if self.has_aperture and surface_id == self.aperture_index:
+                # TODO XXXXX
+                continue
+
             element = self.elements[surface_id]
             left_is_air = element.ext_material.name == "air"
             right_is_air = element.ext_material.name == "air"
@@ -1193,7 +1234,7 @@ class LensSystem:
             print(f"mat[{i}]: {A:.12f}f, {B:.12f}f")
 
         print("\n====== Geometry ======")
-        curvature_radii = [1.0 / e.surface.get_curvature() for e in self.elements]
+        curvature_radii = [1.0 / e.surface.get_curvature() if not(e.surface.get_curvature() == 0.0) else np.inf for e in self.elements]
         z0s = [0] + [e.surface.get_z0() for e in self.elements]
         thicknesses = [z0s[i + 1] - z0s[i] for i in range(len(self.elements))]
         extents = [e.surface.get_radial_extent() for e in self.elements]

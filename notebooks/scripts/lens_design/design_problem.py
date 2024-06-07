@@ -5,7 +5,7 @@ sys.path.append("..")
 import drjit as dr
 import mitsuba as mi
 import typing as tp
-from scripts.lens_design.losses import rms_loss, color_loss
+from scripts.lens_design.losses import rms_loss, rms_loss_and_center #, color_loss
 from scripts.lens_design.lens import LensSystem
 import numpy as np
 
@@ -31,10 +31,15 @@ class FieldSource:
         # source
         self.radius = radius
         # sensor
-        self.near_clip = 0.1
+        self.near_clip = min(0.005, lens_system.rear_z * 0.1)
         self.resolution = resolution
-        self.fov = 45.0
+        # default
+        # self.fov = 45.0
+        # for nikon
+        self.fov = 135.0
         self.camera_pos = [0,0,0]
+        self.fov_changed = False
+        self.pos_changed = False
 
         self.lens_system = lens_system
 
@@ -77,7 +82,7 @@ class FieldSource:
             raise KeyError(f"Sensor `{sensor_key}` already exists in scene!")
 
 
-    def update(self, params: mi.SceneParameters):
+    def update(self, params: mi.SceneParameters) -> None:
         '''
         Update the source and sensor data when the lens system undergoes a gradient step.
         NOTE: currently, the source and sensor positions are not updated when the lens geometry
@@ -109,17 +114,30 @@ class FieldSource:
             # params[f"{self.source_key}.to_world"] = source_to_world
 
             # # sensor update
-            # update transform
-            # params[f"{self.sensor_key}.to_world"] = sensor_to_world
-            # update FOV for upsampling
-            params[f"{self.sensor_key}.x_fov"] = self.fov
+            if self.pos_changed:
+                print(f"[{self.sensor_key}] Setting new camera pos: {self.camera_pos}")
+
+                sensor_to_world = mi.ScalarTransform4f.look_at(
+                    target=[self.camera_pos[0], self.camera_pos[1], -1.0],
+                    # target=mi.ScalarPoint3f(self.camera_pos.x, self.camera_pos.y, -1.0),
+                    origin=self.camera_pos,
+                    up=[0, 1, 0])
+                # update transform
+                params[f"{self.sensor_key}.to_world"] = sensor_to_world
+                self.pos_changed = False
+
+            if self.fov_changed:
+                # update FOV for upsampling
+                params[f"{self.sensor_key}.x_fov"] = self.fov
+                self.fov_changed = False
 
 
-    def upsample_sensor(self, zoom_factor = 2.0):
+    def upsample_sensor(self, zoom_factor: float = 2.0) -> None:
         '''
         Updates the sensor to perform a 2x zoom on the center of the image field.
         '''
         self.fov = dr.rad2deg(2 * dr.atan(dr.rcp(zoom_factor) * dr.tan(0.5 * dr.deg2rad(self.fov))))
+        self.fov_changed = True
 
     @staticmethod
     def createSourceArray(lens_system, resolution: tp.Tuple[int, int], tracer: tp.Callable, num_sources = 1, max_field_angle: float = 0.0):
@@ -136,7 +154,7 @@ class FieldSource:
             dtheta = max_field_angle / (num_sources - 1)
             source_distance = 1.1 * source_radius / np.tan(0.5 * dtheta)
         else:
-            source_distance = max(10.0, 5 * lens_system.front_z)
+            source_distance = max(10.0, 1.1 * lens_system.front_z)
 
         sources = []
         for field_angle in field_angles:
@@ -156,11 +174,16 @@ class FieldSource:
             
         return sources
 
-    def get_central_ray(self):
+    def get_central_ray(self) -> mi.Ray3f:
         direction = dr.normalize(mi.Point3f(self.target) - mi.Point3f(self.origin))
-        return mi.Ray3f(o=self.origin, d=direction, wavelengths=[589.3])
+        if mi.is_spectral:
+            ray = mi.Ray3f(o=self.origin, d=direction, wavelengths=[589.3])
+        else:
+            ray = mi.Ray3f(o=self.origin, d=direction)
+        return ray
 
-    def get_sensor_dict(self, tracer):
+
+    def get_sensor_dict(self, tracer) -> dict:
         '''
         Get the sensor's scene data.
 
@@ -176,11 +199,20 @@ class FieldSource:
         if not(np.all(is_valid)):
             raise AssertionError(f"Source's central ray was not transmitted through the lens system! {is_valid=}")
         
-        z_camera = max(0.02 * self.lens_system.rear_z, 1.1 * self.near_clip)
-        self.camera_pos = [film_pos[0], film_pos[1], z_camera]
+        # NIKON
+        # z_camera = max(0.8 * self.lens_system.rear_z, 1.1 * self.near_clip)
+        # NIKON REPORT IMAGES
+        # # ASPH
+        z_camera = max(0.01 * self.lens_system.rear_z, 1.1 * self.near_clip)
+        # # NON-ASPH
+        # z_camera = 8*max(0.01 * self.lens_system.rear_z, 1.1 * self.near_clip)
+        # DOUBLET
+        # z_camera = max(0.01 * self.lens_system.rear_z, 1.1 * self.near_clip)
+        self.camera_pos = np.array([film_pos[0], film_pos[1], z_camera])
 
+        # TODO: types of target/origin?
         trafo_to_world = mi.ScalarTransform4f.look_at(
-            target=[film_pos[0], film_pos[1], -1.0],
+            target=[self.camera_pos[0], self.camera_pos[1], -1.0],
             origin=self.camera_pos,
             up=[0, 1, 0])
         
@@ -206,23 +238,43 @@ class FieldSource:
                 },
             }
         
-        self.init_pixel_size = self.camera_pos[2] * dr.tan(dr.deg2rad(0.5 * self.fov)) / self.resolution[0]
+        self.init_pixel_size = self.camera_pos[2] * dr.tan(dr.deg2rad(0.5 * self.fov)) / (self.resolution[0] / 2)
+
+        # print(type(self.camera_pos))
+
+        # self.camera_pos = mi.Vector3f(self.camera_pos[0], self.camera_pos[1], self.camera_pos[2])
+        # self.camera_pos = mi.ScalarPoint3f(self.camera_pos)
+        # dr.disable_grad(self.camera_pos)
         
         return sensor_dict
     
-    def get_pixel_size(self):
+    def get_pixel_size(self) -> float:
         '''
         Get the physical size of a camera pixel in millimeters.
         '''
         z_camera = self.camera_pos[2]
-        pixel_size = z_camera * dr.tan(dr.deg2rad(0.5 * self.fov)) / self.resolution[0]
+        # z_camera = self.camera_pos.z
+        pixel_size = z_camera * dr.tan(dr.deg2rad(0.5 * self.fov)) / (self.resolution[0] / 2)
         return pixel_size
     
-    def evaluate_rms_loss(self, image):
+    def center_camera_on_pixel(self, i: mi.Float, j: mi.Float) -> None:
+        pixel_size = self.get_pixel_size()
+        # print("Center (x,y): ", j,i)
+        delta_x = (self.resolution[0] / 2 - 0.5 - j)
+        self.pos_changed = dr.any(delta_x * dr.rcp(self.resolution[0]) > 0.1)
+
+        if self.pos_changed:
+            self.camera_pos[0] -= delta_x * pixel_size
+    
+    def evaluate_rms_loss(self, image: mi.Color3f, recenter: bool = False) -> tuple[mi.Float, mi.Mask]:
         '''
         Compute the physical RMS spot size as well as the upsample flag.
         '''
-        pixel_loss = rms_loss(image)
+        if recenter:
+            pixel_loss, ibar, jbar = rms_loss_and_center(image)
+            self.center_camera_on_pixel(ibar, jbar)
+        else:
+            pixel_loss = rms_loss(image)
         upsample_flag = pixel_loss[0] < dr.sqr(self.resolution[0] * 0.1)
         physical_loss = pixel_loss * self.get_pixel_size() ** 2
         self.losses.append(physical_loss)
@@ -251,8 +303,12 @@ class DesignProblem:
         self.lens_system = lens_system
 
         # TODO  XXXXX
-        self.num_sources = 1
-        self.max_field_angle = 5.0
+        # # DOUBLET
+        # self.num_sources = 1
+        # self.max_field_angle = 32.5 # 23.5
+        # NIKON
+        self.num_sources = 6
+        self.max_field_angle = 32.5 # 23.5
 
 
     def add_field_sources(self, scene, geo_tracer):
@@ -300,7 +356,7 @@ class DesignProblem:
 
 
     def _get_integrator(self, integrator_type: str):
-        max_depth = self.lens_system.size() + 2
+        max_depth = self.lens_system.size() + 2 
         integrator = {
             'type': integrator_type,
             'max_depth': max_depth,
@@ -360,7 +416,8 @@ class DesignProblem:
         # TODO: ideally, the tracer should come packaged/be a method of `lens_system` and
         #       use exact raytracing of the analytic surfaces
         geo_scene = mi.load_dict(self._build_preliminary_scene("prb_basic"))
-        geo_tracer = lambda ray: geo_scene.integrator().trace(geo_scene, ray, self.lens_system.size() + 1)
+        trace_depth = self.lens_system.size() + 1
+        geo_tracer = lambda ray: geo_scene.integrator().trace(geo_scene, ray, trace_depth)
 
         # version of the scene used for rendering
         scene = self._build_preliminary_scene("ptracer")
@@ -390,9 +447,13 @@ class DesignProblem:
 
         # negate direction since ray is traveling backwards
         dir = -mi.Vector3f(dr.tan(thetas), 0.0, 1.0)
-        ray = mi.Ray3f(o = mi.Point3f(rs, 0.0, z_init),
-                       d = dr.normalize(dir),
-                       wavelengths = [589.3])
+        if mi.is_spectral:
+            ray = mi.Ray3f(o = mi.Point3f(rs, 0.0, z_init),
+                        d = dr.normalize(dir),
+                        wavelengths = [589.3])
+        else:
+            ray = mi.Ray3f(o = mi.Point3f(rs, 0.0, z_init),
+                        d = dr.normalize(dir))
         
         _, d_exact, _, out_exact = tracer(ray)
         
@@ -424,17 +485,6 @@ class DesignProblem:
         with dr.suspend_grad():
             self.reset()
             self.scene = self._build_scene()
-            images = [mi.render(self.scene, 
-                                spp=max(self.spp, 512), 
-                                sensor=sensor_idx) 
-                        for sensor_idx in range(self.num_sources)]
-            plt.figure(figsize=(12,6))
-            for sensor_idx, image in enumerate(images):
-                plt.subplot(1, self.num_sources, sensor_idx + 1)
-                # mi.util.write_bitmap("test_image.exr", test_image)
-                plt.imshow(image)
-                emitter_name = self.scene.emitters()[sensor_idx].shape().id().replace("_",".")
-                plt.title(f"sensors[{sensor_idx}]: {emitter_name}")
 
         params = mi.traverse(self.scene)
         optimizer = mi.ad.Adam(lr=self.lr)
@@ -442,6 +492,7 @@ class DesignProblem:
         self.lens_system.add_to_optimizer(optimizer)
         self.params = params
         self.optimizer = optimizer
+        # self.plot_spots()
 
 
     def optimize(self, save_var_history=False):
@@ -467,6 +518,7 @@ class DesignProblem:
 
             loss = mi.Float(0.0)
             upsample_flag = True
+            recenter_flag = True
             for sensor_idx in range(self.num_sources):
                 # Perform a differentiable rendering of the scene
                 image = mi.render(self.scene, 
@@ -488,7 +540,7 @@ class DesignProblem:
                 # # print(sensor_rms_loss, sensor_color_loss)
                 # loss += sensor_rms_loss + sensor_color_loss
 
-                sensor_loss, upsample = self.field_sources[sensor_idx].evaluate_rms_loss(image)
+                sensor_loss, upsample = self.field_sources[sensor_idx].evaluate_rms_loss(image, recenter=recenter_flag)
                 upsample_flag &= upsample
                 loss += 10000 * sensor_loss
 
@@ -500,7 +552,9 @@ class DesignProblem:
             self.optimizer.step()
 
             # Log progress
-            current_loss = loss[0] / (4 ** upsample_steps)
+            # TODO
+            # current_loss = dr.detach(loss[0]) # / (4 ** upsample_steps)
+            current_loss = loss[0]
             loss_values.append(current_loss)
             mi.Thread.thread().logger().log_progress(
                 it / (self.iters-1),
@@ -560,7 +614,6 @@ class DesignProblem:
                 for fs in self.field_sources:
                     fs.upsample_sensor(1 / zoom_factor)
                     fs.update(self.params)
-                # self.upsample_sensors(1 / zoom_factor)
 
             if resolution is not None:
                 self.params[res_key] = curr_resolution
@@ -569,6 +622,37 @@ class DesignProblem:
                 self.params.update(self.optimizer)
 
         return image
+    
+
+    def plot_spots(self, scale=None):
+        with dr.suspend_grad():
+            images = [mi.render(self.scene, 
+                                spp=max(self.spp, 4*512), 
+                                sensor=sensor_idx) 
+                        for sensor_idx in range(self.num_sources)]
+            
+            # ncols = min(3, self.num_sources)
+            # nrows = self.num_sources // ncols + 1
+            # XXXXX
+            ncols = 6
+            nrows = 1
+            plt_row_height = 6 if ncols < 3 else 5
+            plt.figure(figsize=(plt_row_height * ncols, plt_row_height * nrows))
+            for sensor_idx, image in enumerate(images):
+                plt.subplot(nrows, ncols, sensor_idx + 1)
+                if scale is None:
+                    plt.imshow(image / (0.2 * dr.max(image)))
+                else:
+                    plt.imshow(scale * image)
+                emitter_name = self.scene.emitters()[sensor_idx].shape().id().replace("_",".")
+                spot_size = dr.sqrt(self.field_sources[sensor_idx].evaluate_rms_loss(image)[0]).numpy().item()
+                if spot_size > 1e-2:
+                    plt.title(f"sensors[{sensor_idx}]: {emitter_name}\nSpot size = {spot_size:.3f} mm")
+                else:
+                    plt.title(f"sensors[{sensor_idx}]: {emitter_name}\nSpot size = {spot_size * 1000:.3f}" + r" $\mu m$")
+                plt.axis('off')
+                plt.tight_layout()
+
 
 
 
@@ -650,7 +734,7 @@ class ConstrainedEFLProblem(DesignProblem):
                 # sensor_loss = rms_loss(image)
                 # upsample_flag &= sensor_loss[0] < dr.sqr(self.resolution[0] * 0.1)
                 # sensor_loss *= dr.detach(self.field_sources[sensor_idx].init_pixel_area / (4 ** upsample_steps))
-                sensor_loss, upsample = self.field_sources[sensor_idx].evaluate_rms_loss(image)
+                sensor_loss, upsample = self.field_sources[sensor_idx].evaluate_rms_loss(image, recenter=True)
                 upsample_flag &= upsample
                 loss += 10000 * sensor_loss
 
@@ -678,7 +762,9 @@ class ConstrainedEFLProblem(DesignProblem):
             self.optimizer.step()
 
             # Log progress
-            current_loss = loss[0] # / (4 ** upsample_steps)
+            # TODO
+            # current_loss = dr.detach(loss[0]) # / (4 ** upsample_steps)
+            current_loss = loss[0]
             loss_values.append(current_loss)
             mi.Thread.thread().logger().log_progress(
                 it / (self.iters-1),
@@ -743,8 +829,14 @@ def plot_progress(image_init, image_final, spot_size_init, spot_size_final, loss
     high_idx = low_idx + image_init.shape[0]
     image_final_np[low_idx:high_idx, low_idx:high_idx, :] = np.array(image_final)
 
-    show_image(ax[2], image_init_np / (0.2 * np.max(image_init_np)), f'Initial spot size: {spot_size_init:.3e} mm')
-    show_image(ax[3], image_final_np / (0.2 * np.max(image_final_np)), f'Final spot size: {spot_size_final:.3e} mm')
+    def format_spot_size(spot_size):
+            if spot_size > 1e-2:
+                return f"spot size = {spot_size:.3f} mm"
+            else:
+                return f"spot size = {spot_size * 1000:.3f}" + r" $\mu m$"
+
+    show_image(ax[2], image_init_np  / (0.02 * np.max(image_init_np)), "Initial " + format_spot_size(spot_size_init))
+    show_image(ax[3], image_final_np / (0.02 * np.max(image_final_np)), "Final " + format_spot_size(spot_size_final))
 
     if average_spot:
         spot_init  = np.mean(spot_init,  axis=1)
@@ -762,6 +854,7 @@ def plot_progress(image_init, image_final, spot_size_init, spot_size_final, loss
     ax[1].set_ylabel("Norm. radiance (a.u.)")
     ax[1].legend(loc='upper right')
     ax[1].set_xlim([low_idx, high_idx])
+    plt.tight_layout()
 
     mi.set_variant('cuda_ad_dispersion')
 

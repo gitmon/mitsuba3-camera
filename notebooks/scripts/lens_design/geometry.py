@@ -149,7 +149,7 @@ def get_spherical_cap(N, elem_radius: float, abs_curvature: float):
     V_[:,:2] *= (vlens * np.sin(angles) / np.linalg.norm(V[:,:2], axis=1))[:, None]
     V_[np.isnan(V_)] = 0.0
 
-    print("V_ lies on sphere:", np.allclose(np.linalg.norm(V_, axis=1), np.ones_like(vlens)))
+    # print("V_ lies on sphere:", np.allclose(np.linalg.norm(V_, axis=1), np.ones_like(vlens)))
 
     # shift and scale to correct size
     V_[:,2] -= np.cos(target_angle)
