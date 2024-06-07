@@ -676,14 +676,15 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
         Float m_r_scale;
         std::vector<Float> m_ai;    // TODO: switch to fixed-size array?
 
+        // unitless version of eval_conic(); the input r2_ is unitless
         inline Float _eval_conic(Float r2_) const {
             Float sqr_term = 1.f - (1.f + m_K) * dr::sqr(m_c) * r2_;
             Float z_ = m_c * r2_ * dr::rcp(1.f + dr::sqrt(sqr_term));
             return z_;
         }
 
+        // unitless version of eval_conic_grad(); the input r_ is unitless
         inline Float _eval_conic_grad(Float r_) const {
-            // Float r_ = r * dr::rcp(LensInterface<Float, Spectrum>::m_element_radius);
             Float cr = m_c * r_;
             Float sqr_term = 1.f - (1.f + m_K) * dr::sqr(cr);
             Float dz_ = cr * dr::rsqrt(sqr_term);
@@ -714,7 +715,7 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
             return -z_;
         }
 
-        // unitless version of eval_asph_grad; the input r2_ is unitless
+        // unitless version of eval_asph_grad(); the input r2_ is unitless
         Float _eval_asph_grad(Float r2_) const {
             Float r_ = dr::sqrt(r2_);
             Float z_ = 0.f;
@@ -849,6 +850,9 @@ public:
         m_stopdown_ratio = props.get<Float>("stop_ratio", 1.0f);
         m_sample_exit_pupil = props.get<bool>("sample_exit_pupil", false);
 
+
+        bool enable_fine_focus = true;
+
         // build lens materials and geometry
         if (lens_type == "singlet") {
             build_singlet_lens(object_distance, focal_length, lens_diameter / 2);
@@ -865,6 +869,7 @@ public:
         } else if (lens_type == "gauss") {
             build_double_gauss_smith();
         } else if (lens_type == "hypercentric") {
+            enable_fine_focus = false;
             // aperture radius in mm
             Float aperture_size = props.get<Float>("ap_size", 1.0f); 
             // aperture<->lens distance in units of focal lengths.
@@ -873,6 +878,7 @@ public:
             Float aperture_offset = props.get<Float>("ap_offset", 2.0f); 
             build_hypercentric_lens(aperture_size, aperture_offset);
         } else if (lens_type == "asph") {
+            enable_fine_focus = false;
             build_asph_lens();
         } else if (lens_type == "exp1a") {
             build_exp1_doublet(1.5689525390422485f, 0.0263051608728981f);
@@ -893,13 +899,14 @@ public:
         
         // Step 2: fine-focusing
 
-        Float delta = focus_thick_lens(object_distance);
-
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(dr::select(dr::isnan(delta), 0.0f, -delta));
+        if (enable_fine_focus) {
+            Float delta = focus_thick_lens(object_distance);
+            for (const auto &interface : m_interfaces) {
+                interface->offset_along_axis(dr::select(dr::isnan(delta), 0.0f, -delta));
+            }
+            std::cout << "Fine focus adjustment: " << delta << std::endl;
         }
 
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
         m_rear_element_z = m_interfaces.front()->get_z();
         m_rear_element_radius = m_interfaces.front()->get_radius();
         m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
@@ -1358,105 +1365,87 @@ public:
         }
         m_film_z_position = 0.001f * (track_length - (thicknesses.at(0) + thicknesses.at(1) + thicknesses.at(2)));
 
-        Float shutter_time = dr::sqr(z_ap_to_lens * dr::rcp(ap_radius * (ap_radius + lens_radius)));
-        std::cout << "Recommended shutter time: " << shutter_time * 8.0f << "\n";
+        Float shutter_time = dr::sqr(z_ap_to_lens * dr::rcp(ap_radius * (ap_radius + lens_radius))) * 8.0f;
+        std::cout << "Recommended shutter time: " << shutter_time << "\n";
     }
 
 
     void build_asph_lens() {
-        // TODO: find some way to deal with the weird aperture (it's currently excluded)
         // Parameters from:
-        // https://patents.google.com/patent/US8934179B2/en
+        // Patent no. US11561375B2, Embodiment 1 (Tables 1-2)
+        // https://patents.google.com/patent/US11561375B2/en?oq=11%2c561%2c375
 
-        DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
-        DispersiveMaterial<Float, Spectrum> glass_A = DispersiveMaterial<Float, Spectrum>("glass_A", 1.5206352150873f, 0.004988523354517577f);
-        DispersiveMaterial<Float, Spectrum> glass_B = DispersiveMaterial<Float, Spectrum>("glass_B", 1.5949533129576456f, 0.013907192818823239f);
-        DispersiveMaterial<Float, Spectrum> glass_C = DispersiveMaterial<Float, Spectrum>("glass_C", 1.5048569450665132f, 0.004216973209068582f);
+        DispersiveMaterial<Float, Spectrum> air = 
+            DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
+        DispersiveMaterial<Float, Spectrum> glass_A = 
+            DispersiveMaterial<Float, Spectrum>("glass_A", 1.52923858553436f, 0.00509603519451627f);
+        DispersiveMaterial<Float, Spectrum> glass_B = 
+            DispersiveMaterial<Float, Spectrum>("glass_B", 1.59833561885235f, 0.0143836590443554f);
+        DispersiveMaterial<Float, Spectrum> glass_C = 
+            DispersiveMaterial<Float, Spectrum>("glass_C",  1.5205859418518f, 0.00497611850070528f);
+        DispersiveMaterial<Float, Spectrum> NBK7 = 
+            DispersiveMaterial<Float, Spectrum>("NBK7",  1.50478491769513f, 0.00421697320906858f);
 
-        // size_t num_elements = 13;
-        // int aperture_index = 0;
-        // std::vector<float> curv_radii  = { 1e8, 1.754f, -5.259f, 18.175f, 2.111f, 49.667f, 9.971f, 3.479f, 21.778f, 2.402f, 1.334f, 1e8, 1e8 };
-        // std::vector<float> thicknesses = { -0.225f, 0.655f, 0.025f, 0.27f, 0.35f, 0.516f, 0.187f, 0.605f, 0.573f, 0.8f, 0.3f, 0.3f, 0.607f };
-        // std::vector<float> elem_radii  = { 0.89f, 1.026181818f, 1.026181818f, 1.026181818f, 1.026181818f, 1.211636364f, 1.211636364f, 1.446545455f, 1.557818182f, 1.842181818f, 2.373818182f, 2.670545455f, 2.670545455f };
-        // std::vector<float> kappas  = { 0.0f, -1.898E+00, -1.818E+00, 0.000E+00, -2.723E-01, 0.000E+00, 3.438E+00, -3.702E+01, -3.345E+04, -1.855E+01, -4.858E+00, 0.0f, 0.0f };
-        size_t num_elements = 12;
-        int aperture_index = -1;
-        std::vector<float> curv_radii  = { 1.754f, -5.259f, 18.175f, 2.111f, 49.667f, 9.971f, 3.479f, 21.778f, 2.402f, 1.334f, 1e8, 1e8 };
-        std::vector<float> thicknesses = { 0.655f, 0.025f, 0.27f, 0.35f, 0.516f, 0.187f, 0.605f, 0.573f, 0.8f, 0.3f, 0.3f, 0.607f };
-        // std::vector<float> elem_radii  = { 1.026181818f, 1.026181818f, 1.026181818f, 1.026181818f, 1.211636364f, 1.211636364f, 1.446545455f, 1.557818182f, 1.842181818f, 2.373818182f, 2.670545455f, 2.670545455f };
-        std::vector<float> elem_radii  = { 0.89f, 1.026181818f, 1.026181818f, 1.026181818f, 1.211636364f, 1.211636364f, 1.446545455f, 1.557818182f, 1.842181818f, 2.373818182f, 2.670545455f, 2.670545455f };
-        std::vector<float> kappas  = { -1.898E+00, -1.818E+00, 0.000E+00, -2.723E-01, 0.000E+00, 3.438E+00, -3.702E+01, -3.345E+04, -1.855E+01, -4.858E+00, 0.0f, 0.0f };
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::asphere,
+            InterfaceType::aperture,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::asphere,
+            InterfaceType::plane,
+            InterfaceType::plane,
+        };
 
+        std::vector<float> curv_radii  = {1.952f, 1e8, 2.978f, 2.003f, 2.167f, 4.143f, -3.947f, -0.969f, -2.089f, 3.867f, -0.847f, -16.711f, 0.785f, 1e8, 1e8};
+        std::vector<float> thicknesses = {0.118f, 0.28f, 0.069f, 0.28f, 0.205f, 0.551f, 0.211f, 0.421f, 0.03f, 1.105f, 0.03f, 0.44f, 0.7f, 0.3f, 0.235f};
+        std::vector<float> elem_radii  = {0.72391f, 0.70781f, 0.79221f, 0.79661f, 0.91103f, 0.94416f, 1.05504f, 1.07363f, 1.26654f, 1.33913f, 1.56417f, 1.81331f, 2.37438f, 2.72353f, 2.72353f};
+        std::vector<float> kappas = {-2.1201E+00, 0.0, -2.0000E+01, -1.2382E+01, -3.0060E+00, 1.0000E+00, 0.0000E+00, -1.4213E+00, -3.0569E+00, -6.3368E+00, -4.2091E+00, -2.0000E+01, -5.1631E+00, 0.0, 0.0};
         std::vector<std::vector<Float>> ai_list = {
-            // { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // aperture
-            { 3.822E-02, -2.809E-02,  4.970E-02, -5.149E-02,  4.628E-03,  4.215E-03, -3.450E-03 },
-            { 1.288E-01, -1.343E-01,  1.978E-02,  3.399E-04, -6.173E-04, -5.735E-04,  8.520E-12 },
-            { 4.814E-02,  6.037E-02, -1.838E-01,  1.217E-01, -1.665E-02, -5.234E-04,  2.394E-04 },
-            { -8.944E-02,  2.532E-01, -3.068E-01,  2.175E-01, -5.539E-02,  3.281E-03, -6.552E-07 },
-            { -1.060E-01,  5.779E-02,  1.251E-03, -3.017E-02,  6.065E-02, -1.536E-02, -2.048E-03 },
-            { -1.142E-01, -2.103E-02,  7.808E-03,  2.283E-02,  5.590E-05, -1.053E-03, -1.525E-04 },
-            { 5.323E-02, -7.412E-02, -1.800E-02,  1.682E-02,  4.538E-03, -2.738E-03, -1.886E-05 },
-            { -3.596E-02, 9.066E-02, -1.026E-01,  4.108E-02, -5.778E-03, -5.187E-05, -6.175E-06 },
-            { -1.503E-01, 4.478E-02, -7.829E-03, -1.119E-03, 2.461E-04, 0.000E+00, 0.000E+00 },
-            { -9.165E-02, 4.113E-02, -1.389E-02, 2.647E-03, -2.445E-04, 3.564E-06, 6.120E-07 },
-            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // plano-lenses
-            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }    // plano-lenses
+            { 3.5988E-03,	 3.7387E-01,    -1.3929E+00,	 1.4094E+00,	 2.0282E+00,	-3.6199E+00,    0.0000E+00},
+            { 0.0000E+00,	 0.0000E+00,     0.0000E+00,	 0.0000E+00,	 0.0000E+00,	 0.0000E+00,    0.0000E+00},
+            {-1.7492E-01,	 9.8443E-02,	 6.6244E-01, 	-1.7257E+00,	 6.6955E-01,	-3.4243E-01,    0.0000E+00},
+            {-2.6551E-01,	 5.7642E-01,	-1.1253E+00,	 1.1555E+00,	 1.4439E-02,	-1.9141E+00,    0.0000E+00},
+            {-2.5306E-01,	 3.1573E-01,	-2.1258E-01,	 9.4103E-02,	-2.7001E-01,	 1.1110E-01,    0.0000E+00},
+            {-1.4680E-01,	-1.9199E-02,	 1.1489E-01,	-1.6910E-01,	-1.1287E-01,	 1.2615E-01,    0.0000E+00},
+            {-4.4328E-02,	-1.6599E-01,	 4.8223E-02,	 9.4653E-03,	 1.2137E-02,	-8.1558E-03,    0.0000E+00},
+            { 3.3847E-01,	-8.7891E-01,	 1.1445E+00,	-9.1578E-01,	 5.9482E-01,	-2.0143E-01,    0.0000E+00},
+            { 1.4102E-01,	-2.7755E-01,	 3.2138E-01,	-2.4968E-01,	 1.2901E-01,	-2.7976E-02,    0.0000E+00},
+            {-1.6984E-01,	 1.4944E-01,	-9.9124E-02,	 1.3353E-02,	 1.6198E-03,	 1.2524E-03,    0.0000E+00},
+            {-6.7672E-02,	-3.0645E-02,	 1.0444E-01,	-8.3869E-02,	 2.6536E-02,	-2.7869E-03,    0.0000E+00},
+            {-1.3442E-01,	 3.8933E-02,	-6.2383E-03,	 7.5356E-04,	 2.2005E-04,	-5.2957E-05,    0.0000E+00},
+            {-7.5325E-02,	 2.4095E-02,	-5.8920E-03,	 1.0269E-03,	-1.1564E-04,	 5.9417E-06,    0.0000E+00},
+            { 0.0000E+00,	 0.0000E+00,	 0.0000E+00,	 0.0000E+00,	 0.0000E+00,	 0.0000E+00,    0.0000E+00},
+            { 0.0000E+00,	 0.0000E+00,	 0.0000E+00,	 0.0000E+00,	 0.0000E+00,	 0.0000E+00,    0.0000E+00},
         };
 
         std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
-            // air,
             air,
+            glass_A,
             glass_A,
             air,
             glass_B,
             air,
             glass_A,
             air,
-            glass_A,
-            air,
-            glass_A,
+            glass_B,
             air,
             glass_C,
             air,
+            glass_C,
+            air,
+            NBK7,
+            air,
         };
 
-        std::cout << "Array sizes match: " 
-            << (curv_radii.size() == num_elements) << ", "
-            << (thicknesses.size() == num_elements) << ", "
-            << (elem_radii.size() == num_elements) << ", "
-            << (kappas.size() == num_elements) << ", "
-            << (ai_list.size() == num_elements) << ", "
-            << (mats.size() == num_elements + 1) << "\n";
-
-
-
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius, kappa;
-        std::vector<Float> Ai;
-
-        for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii.at(i);
-            thickness   = thicknesses.at(i);
-            z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    air));
-            } else {
-                curv_radius = curv_radii.at(i);
-                kappa = kappas.at(i);
-                Ai = ai_list.at(i);
-                m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(
-                    curv_radius, 
-                    kappa,
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    Ai,
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            }
-        }
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats);
     }
 
 
