@@ -5,7 +5,7 @@ sys.path.append("..")
 import drjit as dr
 import mitsuba as mi
 import typing as tp
-from scripts.lens_design.losses import rms_loss, rms_loss_and_center #, color_loss
+from scripts.lens_design.losses import rms_loss, rms_loss_and_center
 from scripts.lens_design.lens import LensSystem
 import numpy as np
 
@@ -17,6 +17,7 @@ class FieldSource:
                  radius: np.ndarray, 
                  lens_system: LensSystem, 
                  resolution: tuple[int, int], 
+                 init_camera_z: float,
                  # TODO
                  tracer,
                  ):
@@ -44,7 +45,7 @@ class FieldSource:
         self.lens_system = lens_system
 
         # TODO
-        self.sensor_dict = self.get_sensor_dict(tracer)
+        self.sensor_dict = self.get_sensor_dict(tracer, init_camera_z)
         self.losses = []
 
     def add_to_scene(self, scene_dict: dict) -> None:
@@ -119,7 +120,6 @@ class FieldSource:
 
                 sensor_to_world = mi.ScalarTransform4f.look_at(
                     target=[self.camera_pos[0], self.camera_pos[1], -1.0],
-                    # target=mi.ScalarPoint3f(self.camera_pos.x, self.camera_pos.y, -1.0),
                     origin=self.camera_pos,
                     up=[0, 1, 0])
                 # update transform
@@ -140,7 +140,12 @@ class FieldSource:
         self.fov_changed = True
 
     @staticmethod
-    def createSourceArray(lens_system, resolution: tp.Tuple[int, int], tracer: tp.Callable, num_sources = 1, max_field_angle: float = 0.0):
+    def createSourceArray(lens_system: LensSystem, 
+                          resolution: tp.Tuple[int, int], 
+                          tracer: tp.Callable, 
+                          num_sources: int = 1, 
+                          max_field_angle: float = 0.0, 
+                          init_camera_z: float = 0.9):
         '''
         Max field angle in degrees
         '''
@@ -169,6 +174,7 @@ class FieldSource:
                 lens_system=lens_system,
                 resolution=resolution,
                 tracer=tracer,
+                init_camera_z=init_camera_z,
                 )
             sources.append(fs)
             
@@ -183,7 +189,7 @@ class FieldSource:
         return ray
 
 
-    def get_sensor_dict(self, tracer) -> dict:
+    def get_sensor_dict(self, tracer, init_camera_z) -> dict:
         '''
         Get the sensor's scene data.
 
@@ -199,15 +205,7 @@ class FieldSource:
         if not(np.all(is_valid)):
             raise AssertionError(f"Source's central ray was not transmitted through the lens system! {is_valid=}")
         
-        # NIKON
-        # z_camera = max(0.8 * self.lens_system.rear_z, 1.1 * self.near_clip)
-        # NIKON REPORT IMAGES
-        # # ASPH
-        z_camera = max(0.01 * self.lens_system.rear_z, 1.1 * self.near_clip)
-        # # NON-ASPH
-        # z_camera = 8*max(0.01 * self.lens_system.rear_z, 1.1 * self.near_clip)
-        # DOUBLET
-        # z_camera = max(0.01 * self.lens_system.rear_z, 1.1 * self.near_clip)
+        z_camera = max(init_camera_z * self.lens_system.rear_z, 1.1 * self.near_clip)
         self.camera_pos = np.array([film_pos[0], film_pos[1], z_camera])
 
         # TODO: types of target/origin?
@@ -225,7 +223,7 @@ class FieldSource:
 
             'sampler': {
                 'type': 'independent',
-                'sample_count': 512  # Not really used. TODO: remove?
+                'sample_count': 512,
             },
             'film': {
                 'type': 'hdrfilm',
@@ -291,6 +289,9 @@ class DesignProblem:
                  iters: int,
                  output_dir: str,
                  film_diagonal: int = 35,
+                 num_sources: int = 1,
+                 max_field_angle: float = 5.0,
+                 init_camera_z: float = 0.9,
                  ):
 
         lens_system.initialize_geometry(output_dir)
@@ -302,14 +303,9 @@ class DesignProblem:
         self.film_diagonal = film_diagonal
         self.lens_system = lens_system
 
-        # TODO  XXXXX
-        # # DOUBLET
-        # self.num_sources = 1
-        # self.max_field_angle = 32.5 # 23.5
-        # NIKON
-        self.num_sources = 6
-        self.max_field_angle = 32.5 # 23.5
-
+        self.num_sources = num_sources
+        self.max_field_angle = max_field_angle
+        self.init_camera_z = init_camera_z
 
     def add_field_sources(self, scene, geo_tracer):
         '''
@@ -322,7 +318,8 @@ class DesignProblem:
             num_sources=self.num_sources, 
             max_field_angle=self.max_field_angle,
             resolution=self.resolution,
-            tracer=geo_tracer)
+            tracer=geo_tracer,
+            init_camera_z=self.init_camera_z)
 
         for field_source in field_sources:
             field_source.add_to_scene(scene)
@@ -552,8 +549,6 @@ class DesignProblem:
             self.optimizer.step()
 
             # Log progress
-            # TODO
-            # current_loss = dr.detach(loss[0]) # / (4 ** upsample_steps)
             current_loss = loss[0]
             loss_values.append(current_loss)
             mi.Thread.thread().logger().log_progress(
@@ -668,6 +663,9 @@ class ConstrainedEFLProblem(DesignProblem):
                  iters: int,
                  output_dir: str,
                  film_diagonal: int = 35,
+                 num_sources: int = 1,
+                 max_field_angle: float = 5.0,
+                 init_camera_z: float = 0.9,
                  ):
         
         self.target_focal_length = target_focal_length
@@ -693,7 +691,16 @@ class ConstrainedEFLProblem(DesignProblem):
         # lens_system.initialize_geometry(output_dir)
         # lens_system.disable_all_materials()
 
-        super().__init__(lens_system, resolution, spp, learning_rate, iters, output_dir, film_diagonal)
+        super().__init__(lens_system=lens_system, 
+                         resolution=resolution, 
+                         spp=spp, 
+                         learning_rate=learning_rate, 
+                         iters=iters, 
+                         output_dir=output_dir, 
+                         film_diagonal=film_diagonal,
+                         num_sources=num_sources,
+                         max_field_angle=max_field_angle,
+                         init_camera_z=init_camera_z)
 
     @override
     def optimize(self, save_var_history=False):
@@ -762,8 +769,6 @@ class ConstrainedEFLProblem(DesignProblem):
             self.optimizer.step()
 
             # Log progress
-            # TODO
-            # current_loss = dr.detach(loss[0]) # / (4 ** upsample_steps)
             current_loss = loss[0]
             loss_values.append(current_loss)
             mi.Thread.thread().logger().log_progress(
