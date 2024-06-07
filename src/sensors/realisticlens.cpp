@@ -817,7 +817,7 @@ class AsphericalLens final : public LensInterface<Float, Spectrum> {
         }
 };
 
-
+enum class InterfaceType { sphere, asphere, aperture, plane };
 
 
 template <typename Float, typename Spectrum>
@@ -846,25 +846,24 @@ public:
         object_distance = props.get<Float>("object_distance", 6.0f);
         focal_length    = props.get<Float>("lens_focal_length",    0.05f);
         lens_diameter   = props.get<Float>("lens_diameter",   0.01f);
+        m_stopdown_ratio = props.get<Float>("stop_ratio", 1.0f);
         m_sample_exit_pupil = props.get<bool>("sample_exit_pupil", false);
 
+        // build lens materials and geometry
         if (lens_type == "singlet") {
-            build_thin_lens(object_distance, focal_length, lens_diameter / 2);
+            build_singlet_lens(object_distance, focal_length, lens_diameter / 2);
         } else if (lens_type == "doublet") {
-            build_right_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
-        } else if (lens_type == "flipped_doublet") {
-            build_flipped_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
+            build_doublet_lens(object_distance, focal_length / 2, lens_diameter / 2);
         } else if (lens_type == "tessar") {
-            build_tessar_lens(object_distance);
+            build_tessar_lens();
         } else if (lens_type == "helios") {
-            build_helios_lens(object_distance);
+            build_helios_lens();
         } else if (lens_type == "jupiter") {
-            build_jupiter_lens(object_distance);
+            build_jupiter_lens();
         } else if (lens_type == "fisheye") {
-            build_fisheye_lens(object_distance);
+            build_fisheye_lens();
         } else if (lens_type == "gauss") {
-            // build_double_gauss_laikin(object_distance);
-            build_double_gauss_smith(object_distance);
+            build_double_gauss_smith();
         } else if (lens_type == "hypercentric") {
             // aperture radius in mm
             Float aperture_size = props.get<Float>("ap_size", 1.0f); 
@@ -874,23 +873,38 @@ public:
             Float aperture_offset = props.get<Float>("ap_offset", 2.0f); 
             build_hypercentric_lens(aperture_size, aperture_offset);
         } else if (lens_type == "asph") {
-            build_asph_lens(object_distance);
+            build_asph_lens();
         } else if (lens_type == "exp1a") {
-            build_doublet_exp1_uncorr(object_distance);
+            build_exp1_doublet(1.5689525390422485f, 0.0263051608728981f);
         } else if (lens_type == "exp1b") {
-            build_doublet_exp1_corr(object_distance);
+            build_exp1_doublet(1.507009332993809f, 0.04781645616233479f);
         } else if (lens_type == "exp1c") {
-            build_doublet_exp1_exact(object_distance);
+            build_exp1_doublet(1.5030211256389316f, 0.04920145883751409f);
         } else if (lens_type == "exp2a") {
-            build_exp2_nikon(object_distance, 0);
+            build_exp2_nikon(0);
         } else if (lens_type == "exp2b") {
-            build_exp2_nikon(object_distance, 1);
+            build_exp2_nikon(1);
         } else if (lens_type == "exp2c") {
-            build_exp2_nikon(object_distance, 2);
+            build_exp2_nikon(2);
         } else {
-            build_thin_lens(object_distance, focal_length, lens_diameter / 2);
+            build_singlet_lens(object_distance, focal_length, lens_diameter / 2);
+        }
+        // finish initializing lens
+        
+        // Step 2: fine-focusing
+
+        Float delta = focus_thick_lens(object_distance);
+
+        for (const auto &interface : m_interfaces) {
+            interface->offset_along_axis(dr::select(dr::isnan(delta), 0.0f, -delta));
         }
 
+        std::cout << "Fine focus adjustment: " << delta << std::endl;
+        m_rear_element_z = m_interfaces.front()->get_z();
+        m_rear_element_radius = m_interfaces.front()->get_radius();
+        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+
+        // Step 3: build exit pupil LUT
         m_qmc_sampler = new RadicalInverse();
 
         if (m_sample_exit_pupil) {
@@ -907,10 +921,12 @@ public:
                                 << pupil_bound.max.x() << ", " << pupil_bound.max.y() << "\n";
             render_exit_pupil(r_pupil, wv, 1 << 20);
         }
+
+        // draw_cross_section(32);
     }
 
 
-    void build_thin_lens(Float object_distance, Float curvature_radius, Float lens_radius) {
+    void build_singlet_lens(Float object_distance, Float curvature_radius, Float lens_radius) {
         // place the film plane at the image formation distance `xi` away from the lens
         // equivalently, keep the film plane at z=0 and move the lens to `z_intercept` = `xi`
 
@@ -928,89 +944,10 @@ public:
         m_interfaces.push_back(lens1);
         auto lens2 = new SpheroidLens<Float, Spectrum>(-curvature_radius, lens_radius, z_intercept + thickness, glass_material, air_material);
         m_interfaces.push_back(lens2);
-
-        // m_rear_element_z = z_intercept;
-        // m_rear_element_radius = lens_radius;
-
-        // // get a (conservative) estimate of the lens' total extent. This is used to launch
-        // // rays from the outside world towards the lens body.
-        // m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(curvature_radius);
-
-        // Float delta = focus_thick_lens(distance);
-        // Float tmp = -distance / (1.f - distance / curvature_radius);
-
-        // std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
-
-        Float delta = focus_thick_lens(distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        // draw_cross_section(16);
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(curvature_radius);
-
     }
 
 
-    void build_flipped_doublet_lens(Float object_distance, Float R, Float lens_radius) {
-        // NOTE: our doublet focal length formula only applies if the two glasses have the same index!!!
-        Float focal_length = 2.0f * R;
-        Float distance = dr::maximum(object_distance, 4.001f * focal_length);
-        Float z_intercept = 0.5f * distance * (1.f - dr::sqrt(1.f - 4.f * focal_length / distance));
-        
-        // z_intercept += 0.0201023f;
-        Float thickness = 2.f * R * (1.f - dr::sqrt(1.f - (lens_radius / R) * (lens_radius / R)));
-
-        DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
-        // crown glass for convex lens; N-BK7
-        DispersiveMaterial<Float, Spectrum> glass_1 = DispersiveMaterial<Float, Spectrum>("NBK7", 1.5046f, 0.00420f);
-        // flint glass for concave lens; N-SF5
-        // std::vector<std::pair<float, float>> terms = {
-        //                                     std::pair(1.52481889f, 0.01125475600f), 
-        //                                     std::pair(0.187085527f, 0.0588995392f), 
-        //                                     std::pair(1.427290150f, 129.1416750f)};
-        // DispersiveMaterial<Float, Spectrum> glass_2 = DispersiveMaterial<Float, Spectrum>(terms);
-        // fake N-BK7 with a tweaked abbe number, to cancel `glass_1` and form a functional achromat
-        DispersiveMaterial<Float, Spectrum> glass_2 = DispersiveMaterial<Float, Spectrum>("mod-NBK7", 1.5046f, 0.00860948454f);
-
-        std::cout << "Abbe numbers: V1 = " << glass_1.compute_abbe_number() << ", V2 = " << glass_2.compute_abbe_number() << "\n";
-        std::cout << "We should have V1 = 2 * V2.\n";
-        auto elem1 = new SpheroidLens<Float, Spectrum>(R, lens_radius, z_intercept, air, glass_1);
-        m_interfaces.push_back(elem1);
-        auto elem2 = new SpheroidLens<Float, Spectrum>(-R, lens_radius, z_intercept + thickness, glass_1, glass_2);
-        m_interfaces.push_back(elem2);
-        auto elem3 = new PlanoLens<Float, Spectrum>(Normal3f(0.f,0.f,-1.f), lens_radius, z_intercept + 2.f * thickness, glass_2, air);
-        m_interfaces.push_back(elem3);
-        // auto elem4 = new ApertureStop<Float, Spectrum>(0.1f * lens_radius, z_intercept + 3.f * thickness, air);
-        // m_interfaces.push_back(elem4);
-
-        Float delta = focus_thick_lens(distance);
-        std::cout << "Pre-focus: " << delta << "\n";
-        // draw_cross_section(16);
-
-        for (const auto &interface : m_interfaces) {
-            std::cout << interface->get_z() << ", ";
-            interface->offset_along_axis(-delta);
-            std::cout << interface->get_z() << "\n";
-        }
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        // get a (conservative) estimate of the lens' total extent. This is used to launch
-        // rays from the outside world towards the lens body.
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(R);
-
-        // draw_cross_section(16);
-
-        delta = focus_thick_lens(distance);
-
-        std::cout << "Adjustment from focus_thick_lens() (should be close to zero): " << -delta << std::endl;
-    }
-
-    void build_right_doublet_lens(Float object_distance, Float R, Float lens_radius) {
+    void build_doublet_lens(Float object_distance, Float R, Float lens_radius) {
         Float focal_length = 2.0f * R;
         Float distance = dr::maximum(object_distance, 4.001f * focal_length);
         Float z_intercept = 0.5f * distance * (1.f - dr::sqrt(1.f - 4.f * focal_length / distance));
@@ -1028,39 +965,9 @@ public:
         m_interfaces.push_back(elem1);
         auto elem0 = new ApertureStop<Float, Spectrum>(1.f * lens_radius, z_intercept + 3.f * thickness, air);
         m_interfaces.push_back(elem0);
-
-        Float delta = focus_thick_lens(distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        // draw_cross_section(16);
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(R);
     }
 
-
-    void build_plano_lens(Float z_intercept, Float thickness, Float lens_radius, Float aperture_radius) {
-        DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
-        DispersiveMaterial<Float, Spectrum> glass = DispersiveMaterial<Float, Spectrum>("NBK7", 1.5046f, 0.00420f);
-
-        auto elem1 = new PlanoLens<Float, Spectrum>(lens_radius, z_intercept, air, glass);
-        m_interfaces.push_back(elem1);
-        auto elem2 = new PlanoLens<Float, Spectrum>(lens_radius, z_intercept + thickness, glass, air);
-        m_interfaces.push_back(elem2);
-        auto elem3 = new ApertureStop<Float, Spectrum>(aperture_radius, z_intercept + 2.f * thickness, air);
-        m_interfaces.push_back(elem3);
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + 1.0f;
-
-        // draw_cross_section(16);
-    }
-
-    void build_tessar_lens(Float object_distance) {
+    void build_tessar_lens() {
         // Parameters from:
         // https://henryquach.org/tessar.html
 
@@ -1078,73 +985,44 @@ public:
             Vector3f(1.397570370, 0.159201403, 1.268654300), 
             Vector3f(0.009959061, 0.0546931752, 119.24834600));
 
-        // -
-        // 0. convert mm -> m                   // TODO: remove this requirement
-        // 1. reverse order of elements
-        // 2. start summing thickness from 0
-        // 3. flip sign of radii                // TODO: remove this requirement
-        // 4. radius = diameter / 2
-        // 5. auto-fill materials
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::aperture,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+        };
 
-        Float z_pos = 0.0f;
-        Float t;
-
-        // surface8
-        t = 0.001f * 86.917f;
-        z_pos += t;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * 43.567f, 0.001f * 16.f / 2, z_pos, air, NLAK9));
-
-        // surface7
-        t = 0.001f * 9.941f;
-        z_pos += t;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * -45.344f, 0.001f * 16.f / 2, z_pos, NLAK9, K10));
-
-        // surface6
-        t = 0.001f * 2.286f;
-        z_pos += t;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * 86.620f, 0.001f * 16.f / 2, z_pos, K10, air));
-
-        // surface5
-        t = 0.001f * 1.999f;
-        z_pos += t;
-        m_interfaces.push_back(new ApertureStop<Float, Spectrum>(0.001f * 9.3f / 2, z_pos, air));
-
-        // surface4
-        t = 0.001f * 2.289f;
-        z_pos += t;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * -31.297f, 0.001f * 12.f / 2, z_pos, air, F2));
-
-        // surface3
-        t = 0.001f * 2.290f;
-        z_pos += t;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * 63.028f, 0.001f * 12.f / 2, z_pos, F2, air));
-
-        // surface2
-        t = 0.001f * 2.286f;
-        z_pos += t;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * 296.111f, 0.001f * 18.f / 2, z_pos, air, NLAK9));
-
-        // surface1
-        t = 0.001f * 3.567f;
-        z_pos += t;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(0.001f * -35.034f, 0.001f * 18.f / 2, z_pos, NLAK9, air));
-
-        // draw_cross_section(16);
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
+        std::vector<float> curv_radii  = {35.034f, -296.111f, -63.028f, 31.297f, 100000000, -86.620f, 45.344f, -43.567f};
+        std::vector<float> thicknesses = {3.567f, 2.286f, 2.290f, 2.289f, 1.999f, 2.286f, 9.941f, 86.917f};
+        std::vector<float> elem_radii  = {9.0f, 9.0f, 6.0f, 6.0f, 4.65f, 8.0f, 8.0f, 8.0f};
+        std::vector<float> kappas = {};
+        std::vector<std::vector<Float>> ai_list = {};
+        for (size_t i = 0; i < thicknesses.size(); ++i) {
+            kappas.push_back(0.0f);
+            ai_list.push_back({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
         }
 
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
+            air,
+            NLAK9,
+            air,
+            F2,
+            air,
+            air,
+            K10,
+            NLAK9,
+            air,
+        };
 
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats);
     }
 
 
-    void build_helios_lens(Float object_distance) {
+    void build_helios_lens() {
         // Helios 44M-4 (swirly bokeh)
         // https://www.photonstophotos.net/GeneralTopics/Lenses/OpticalBench/GOI/ST01FB06.txt
 
@@ -1158,160 +1036,50 @@ public:
         DispersiveMaterial<Float, Spectrum> LF7_glass = 
             DispersiveMaterial<Float, Spectrum>("LF7_glass",  1.551328271f, 0.008025103f);
 
-        // std::array<DispersiveMaterial<Float, Spectrum>, 12> materials = {
-        //     air, BF16_glass, air, TK14_glass, LF7_glass, air, air, LF7_glass, TK14_glass, air, TK14_glass, air
-        // };
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::aperture,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+        };
 
-        // provide data in millimeters
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        // surface10
-        curv_radius = -52.725f;
-        thickness   = 38.08f;
-        elem_radius = 12.35f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             air, 
-             BF16_glass));
-
-        // surface9
-        curv_radius = 191.54f;
-        thickness   = 4.94f;
-        elem_radius = 12.35f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             BF16_glass, 
-             air));
-
-        // surface8
-        curv_radius = -22.21f;
-        thickness   = 0.5f;
-        elem_radius = 10.6f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             air, 
-             TK14_glass));
-
-        // surface7
-        curv_radius = 66.085f;
-        thickness   = 6.25f;
-        elem_radius = 10.2f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             TK14_glass, 
-             LF7_glass));
-
-        // surface6
-        curv_radius = -16.62f;
-        thickness   = 1.32f;
-        elem_radius = 9.35f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             LF7_glass, 
-             air));
-
-        // surface5_AS
-        thickness = 4.63f;
-        elem_radius = 9.575f;   // f/2
-        // elem_radius = 0.299f;   // f/32
-        z_pos += thickness;
-        m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-            0.001f * elem_radius, 
-            0.001f * z_pos, 
-            air));
-
-        // surface5
-        curv_radius = 15.995f;
-        thickness   = 4.7f;
-        elem_radius = 9.75f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             air, 
-             LF7_glass));
-
-        // surface4
-        curv_radius = -124.225f;
-        thickness   = 1.31f;
-        elem_radius = 11.6f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             LF7_glass, 
-             TK14_glass));
-
-        // surface3
-        curv_radius = 25.33f;
-        thickness   = 9.07f;
-        elem_radius = 13.2f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             TK14_glass, 
-             air));
-
-        // surface2
-        curv_radius = 136.365f;
-        thickness   = 2.26f;
-        elem_radius = 14.75f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             air, 
-             TK14_glass));
-
-        // surface1
-        curv_radius = 38.07f;
-        thickness   = 4.81f;
-        elem_radius = 14.75f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             TK14_glass, 
-             air));
-
-        // draw_cross_section(16);
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
+        std::vector<float> curv_radii  = {38.07f, 136.365f, 25.33f, -124.225f, 15.995f, 1.00E+08, -16.62f, 66.085f, -22.21f, 191.54f, -52.725f};
+        std::vector<float> thicknesses = {4.81f, 2.26f, 9.07f, 1.31f, 4.7f, 4.63f, 1.32f, 6.25f, 0.5f, 4.94f, 38.08f};
+        std::vector<float> elem_radii  = {14.75f, 14.75f, 13.2f, 11.6f, 9.75f, 9.575f, 9.35f, 10.2f, 10.6f, 12.35f, 12.35f};
+        std::vector<float> kappas = {};
+        std::vector<std::vector<Float>> ai_list = {};
+        for (size_t i = 0; i < thicknesses.size(); ++i) {
+            kappas.push_back(0.0f);
+            ai_list.push_back({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
         }
 
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
+            air,
+            TK14_glass,
+            air,
+            TK14_glass,
+            LF7_glass,
+            air,
+            air,
+            LF7_glass,
+            TK14_glass,
+            air,
+            BF16_glass,
+            air,
+        };
 
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats);
     }
 
 
-    void build_jupiter_lens(Float object_distance) {
+    void build_jupiter_lens() {
         // Jupiter-9 (swirly bokeh)
         // https://www.photonstophotos.net/GeneralTopics/Lenses/OpticalBench/GOI/ST01FB43.txt
 
@@ -1331,164 +1099,50 @@ public:
         DispersiveMaterial<Float, Spectrum> BF7_glass = 
             DispersiveMaterial<Float, Spectrum>("BF7_glass", 1.562693323f, 0.005811246f);
 
-        // 1. reverse order of elements
-        // 2. start summing thickness from 0
-        // 5. auto-fill materials
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::aperture,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+        };
 
-        // std::array<DispersiveMaterial<Float, Spectrum>, 12> materials = {
-        //     air, BF16_glass, air, TK14_glass, LF7_glass, air, air, LF7_glass, TK14_glass, air, TK14_glass, air
-        // };
-
-        // provide data in millimeters
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        // surface10
-        curv_radius = -95.06f;
-        thickness   = 40.53f;
-        elem_radius = 15.15f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             air, 
-             BF7_glass));
-
-        // surface9
-        curv_radius = -15.031f;
-        thickness   = 2.9f;
-        elem_radius = 13.5f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             BF7_glass, 
-             BF13_glass));
-
-        // surface8
-        curv_radius = 44.51f;
-        thickness   = 10.6f;
-        elem_radius = 13.5f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             BF13_glass, 
-             OF1_glass));
-
-        // surface7
-        curv_radius = -1043.65f;
-        thickness   = 2.8f;
-        elem_radius = 24.57f * 0.5f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             OF1_glass, 
-             air));
-
-        // surface6_AS
-        thickness = 3.8f;
-        elem_radius = 12.275f;   // f/2
-        // elem_radius = 0.767f;   // f/32
-        z_pos += thickness;
-        m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-            0.001f * elem_radius, 
-            0.001f * z_pos, 
-            air));
-
-        // surface6
-        curv_radius = 16.444f;
-        thickness   = 10.0f;
-        elem_radius = 12.68f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             air, 
-             TF2_glass));
-
-        // surface5
-        curv_radius = -264.2f;
-        thickness   = 1.8f;
-        elem_radius = 19.015f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             TF2_glass, 
-             K1_glass));
-
-        // surface4
-        curv_radius = 52.0f;
-        thickness   = 7.5f;
-        elem_radius = 19.015f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             K1_glass, 
-             BF13_glass));
-
-        // surface3
-        curv_radius = 25.94f;
-        thickness   = 5.8f;
-        elem_radius = 19.015f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             BF13_glass, 
-             air));
-
-        // surface2
-        curv_radius = 268.5f;
-        thickness   = 0.4f;
-        elem_radius = 22.0f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             air, 
-             TK16_glass));
-
-        // surface1
-        curv_radius = 46.45f;
-        thickness   = 5.6f;
-        elem_radius = 22.0f;
-        z_pos += thickness;
-        m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-            -0.001f * curv_radius, 
-             0.001f * elem_radius, 
-             0.001f * z_pos, 
-             TK16_glass, 
-             air));
-
-        // draw_cross_section(16);
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
+        std::vector<float> curv_radii  = {46.45f, 268.5f, 25.94f, 52.0f, -264.2f, 16.444f, 1.00E+08, -1043.65f, 44.51f, -15.031f, -95.06f};
+        std::vector<float> thicknesses = {5.6f, 0.4f, 5.8f, 7.5f, 1.8f, 10.0f, 3.8f, 2.8f, 10.6f, 2.9f, 40.53f};
+        std::vector<float> elem_radii  = {22.0f, 22.0f, 19.015f, 19.015f, 19.015f, 12.68f, 12.275f, 24.57f * 0.5f, 13.5f, 13.5f, 15.15f};
+        std::vector<float> kappas = {};
+        std::vector<std::vector<Float>> ai_list = {};
+        for (size_t i = 0; i < thicknesses.size(); ++i) {
+            kappas.push_back(0.0f);
+            ai_list.push_back({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
         }
 
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
+        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
+            air,
+            TK16_glass,
+            air,
+            BF13_glass,
+            K1_glass,
+            TF2_glass,
+            air,
+            air,
+            OF1_glass,
+            BF13_glass,
+            BF7_glass,
+            air,
+        };
 
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats);
     }
 
 
-    void build_fisheye_lens(Float object_distance) {
+    void build_fisheye_lens() {
         // Canon EF15mm f/2.8 Fisheye
         // https://www.photonstophotos.net/GeneralTopics/Lenses/OpticalBench/Data/JP1988-017421_Example03P.txt
 
@@ -1505,11 +1159,36 @@ public:
         DispersiveMaterial<Float, Spectrum> glass_E = 
             DispersiveMaterial<Float, Spectrum>("glass_E", 1.4983808648479255f, 0.004423976662977713f);
 
-        int num_elements = 16;
-        int aperture_index = 8;
-        std::vector<float> curv_radii  = {78.06f, 15.9f, 22.22f, 13.27f, 127.88f, 22.35f, 32.04f, -190.22f, -10000.0f, -289.77f, -29.1f, -100.42f, 29.39f, -25.73f, 43.88f, -43.88f};
+        // int num_elements = 16;
+        // int aperture_index = 8;
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::aperture,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+        };
+        std::vector<float> curv_radii  = {78.06f, 15.9f, 22.22f, 13.27f, 127.88f, 22.35f, 32.04f, -190.22f, -1000000.0f, -289.77f, -29.1f, -100.42f, 29.39f, -25.73f, 43.88f, -43.88f};
         std::vector<float> thicknesses = {2.5f, 11.83f, 2.5f, 7.54f, 5.34f, 1.85f, 6.71f, 3.84f, 3.53f, 2.72f, 0.15f, 3.99f, 5.14f, 0.15f, 4.84f, 39.67f};
         std::vector<float> elem_radii  = {31.725f, 15.9f, 13.89f, 10.69f, 9.955f, 7.61f, 6.73f, 6.73f, 6.659f, 7.21f, 7.21f, 9.52f, 9.52f, 9.52f, 11.71f, 11.71f};
+        std::vector<float> kappas = {};
+        std::vector<std::vector<Float>> ai_list = {};
+        for (size_t i = 0; i < thicknesses.size(); ++i) {
+            kappas.push_back(0.0f);
+            ai_list.push_back({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
+        }
+
         std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
             air,
             glass_A,
@@ -1527,128 +1206,14 @@ public:
             glass_C,
             air,
             glass_C,
-            air
-        };
-
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii.at(i);
-            thickness   = thicknesses.at(i);
-            z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    air));
-            } else {
-                curv_radius = curv_radii.at(i);
-                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-                    -0.001f * curv_radius, 
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            }
-        }
-
-        // draw_cross_section(16);
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
-    }
-
-
-    void build_double_gauss_laikin(Float object_distance) {
-        // Double Gauss design from M. Laikin (1995)
-
-        DispersiveMaterial<Float, Spectrum> air = 
-            DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
-        DispersiveMaterial<Float, Spectrum> glass_A = 
-            DispersiveMaterial<Float, Spectrum>("glass_A", 1.63659692767207f, 0.00969002521211442f);
-        DispersiveMaterial<Float, Spectrum> glass_B = 
-            DispersiveMaterial<Float, Spectrum>("glass_B", 1.65938179016658f, 0.00643090187561501f);
-        DispersiveMaterial<Float, Spectrum> glass_C = 
-            DispersiveMaterial<Float, Spectrum>("glass_C", 1.61883869347144f, 0.0100227955054381f);
-        DispersiveMaterial<Float, Spectrum> glass_D = 
-            DispersiveMaterial<Float, Spectrum>("glass_D", 1.65554123059992f, 0.0115846496304389f);
-        DispersiveMaterial<Float, Spectrum> glass_E = 
-            DispersiveMaterial<Float, Spectrum>("glass_E", 1.93456154756568f, 0.00918140008551917f);
-        DispersiveMaterial<Float, Spectrum> glass_F = 
-            DispersiveMaterial<Float, Spectrum>("glass_F", 1.65938179016658f, 0.00643090187561501f);
-        DispersiveMaterial<Float, Spectrum> glass_G = 
-            DispersiveMaterial<Float, Spectrum>("glass_G", 1.93456154756568f, 0.00918140008551917f);
-
-        int num_elements = 13;
-        int aperture_index = 5;
-        std::vector<float> curv_radii  = {33.802f, 85.717f, 28.745f, 362.913f, 16.728f, 10000.0f, -15.87f, 142.743f, -24.277f, -217.518f, -37.368f, 77.892f, -1178.029f};
-        std::vector<float> thicknesses = {5.817f, 0.279f, 6.807f, 2.032f, 9.779f, 10.211f, 2.057f, 7.899f, 0.279f, 5.994f, 0.279f, 4.597f, 35.509f};
-        std::vector<float> elem_radii  = {20.83f, 19.56f, 17.27f, 17.27f, 11.305f, 9.525f, 10.67f, 16.385f, 16.385f, 20.065f, 20.065f, 21.97f, 21.97f};
-        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
-            air,
-            glass_A,
-            air,
-            glass_B,
-            glass_C,
-            air,
-            air,
-            glass_D,
-            glass_E,
-            air,
-            glass_F,
-            air,
-            glass_G,
             air,
         };
 
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii.at(i);
-            thickness   = thicknesses.at(i);
-            z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    air));
-            } else {
-                curv_radius = curv_radii.at(i);
-                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-                    -0.001f * curv_radius, 
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            }
-        }
-
-        // draw_cross_section(16);
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats);
     }
 
 
-    void build_double_gauss_smith(Float object_distance) {
+    void build_double_gauss_smith() {
         // Double Gauss design from Smith, Modern Optical Engineering.
 
         DispersiveMaterial<Float, Spectrum> air = 
@@ -1664,11 +1229,31 @@ public:
         DispersiveMaterial<Float, Spectrum> glass_E = 
             DispersiveMaterial<Float, Spectrum>("glass_E", 1.69447574875623f, 0.00782209786331075f);
 
-        int num_elements = 11;
-        int aperture_index = 5;
-        std::vector<float> curv_radii  = {58.95f, 169.66f, 38.55f, 81.54f, 25.5f, 10000.0f, -28.99f, 81.54f, -40.77f, 874.13f, -79.46f};
+        // int num_elements = 11;
+        // int aperture_index = 5;
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::aperture,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+        };
+        std::vector<float> curv_radii  = {58.95f, 169.66f, 38.55f, 81.54f, 25.5f, 10000000.0f, -28.99f, 81.54f, -40.77f, 874.13f, -79.46f};
         std::vector<float> thicknesses = {7.52f, 0.24f, 8.05f, 6.55f, 11.41f, 9.0f, 2.36f, 12.13f, 0.38f, 6.44f, 72.228f};
         std::vector<float> elem_radii  = {25.2f, 25.2f, 23.0f, 23.0f, 18.0f, 17.1f, 17.0f, 20.0f, 20.0f, 20.0f, 20.0f};
+        std::vector<float> kappas = {};
+        std::vector<std::vector<Float>> ai_list = {};
+        for (size_t i = 0; i < thicknesses.size(); ++i) {
+            kappas.push_back(0.0f);
+            ai_list.push_back({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
+        }
+
         std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
             air,
             glass_A,
@@ -1684,57 +1269,38 @@ public:
             air,
         };
 
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii.at(i);
-            thickness   = thicknesses.at(i);
-            z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    air));
-            } else {
-                curv_radius = curv_radii.at(i);
-                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-                    -0.001f * curv_radius, 
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            }
-        }
-
-        draw_cross_section(16);
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats);
     }
 
 
-    void build_doublet_exp1_uncorr(Float object_distance) {
+    void build_exp1_doublet(float mat_cauchy_A, float mat_cauchy_B) {
         DispersiveMaterial<Float, Spectrum> air = 
             DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
         DispersiveMaterial<Float, Spectrum> glass_A = 
             DispersiveMaterial<Float, Spectrum>("glass_A", 1.4560798389592584, 0.021086562958141358);
         DispersiveMaterial<Float, Spectrum> glass_B = 
-            DispersiveMaterial<Float, Spectrum>("glass_B", 1.5689525390422485, 0.0263051608728981);
+            DispersiveMaterial<Float, Spectrum>("glass_B", mat_cauchy_A, mat_cauchy_B);
 
-        int num_elements = 4;
-        int aperture_index = 0;
+        // int num_elements = 4;
+        // int aperture_index = 0;
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::aperture,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+            InterfaceType::sphere,
+        };
+
         std::vector<float> curv_radii  = {1000.0f, 24.00000000f, -24.00000000f, -168.01068267f};
         std::vector<float> thicknesses = {0.0f, 3.00000000f, 2.25291824f, 46.74708176f};
         std::vector<float> elem_radii  = {8.0f, 8.00000000f, 8.00000000f, 8.00000000f};
+        std::vector<float> kappas      = {0.0f, 0.0f, 0.0f, 0.0f};
+        std::vector<std::vector<Float>> ai_list = {
+            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // 1
+            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // 2
+            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // 3
+            { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // 4
+        };
+
         std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
             air,
             air,
@@ -1743,147 +1309,7 @@ public:
             air,
         };
 
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii.at(i);
-            thickness   = thicknesses.at(i);
-            z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    air));
-            } else {
-                curv_radius = curv_radii.at(i);
-                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-                    -0.001f * curv_radius, 
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            }
-        }
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
-    }
-
-
-    void build_doublet_exp1_corr(Float object_distance) {
-        DispersiveMaterial<Float, Spectrum> air = 
-            DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
-        DispersiveMaterial<Float, Spectrum> glass_A = 
-            DispersiveMaterial<Float, Spectrum>("glass_A", 1.4560798389592584, 0.021086562958141358);
-        DispersiveMaterial<Float, Spectrum> glass_B = 
-            DispersiveMaterial<Float, Spectrum>("glass_B", 1.507009332993809, 0.04781645616233479);
-
-        int num_elements = 4;
-        int aperture_index = 0;
-        std::vector<float> curv_radii  = {1000.0f, 24.00000000f, -24.00000000f, -168.01068267f};
-        std::vector<float> thicknesses = {0.0f, 3.00000000f, 2.25291824f, 46.74708176f};
-        std::vector<float> elem_radii  = {8.0f, 8.00000000f, 8.00000000f, 8.00000000f};
-        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
-            air,
-            air,
-            glass_A,
-            glass_B,
-            air,
-        };
-
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii.at(i);
-            thickness   = thicknesses.at(i);
-            z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    air));
-            } else {
-                curv_radius = curv_radii.at(i);
-                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-                    -0.001f * curv_radius, 
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            }
-        }
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
-    }
-
-
-    void build_doublet_exp1_exact(Float object_distance) {
-        DispersiveMaterial<Float, Spectrum> air = 
-            DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
-        DispersiveMaterial<Float, Spectrum> glass_A = 
-            DispersiveMaterial<Float, Spectrum>("glass_A", 1.4560798389592584, 0.021086562958141358);
-        DispersiveMaterial<Float, Spectrum> glass_B = 
-            DispersiveMaterial<Float, Spectrum>("glass_B", 1.5030211256389316, 0.04920145883751409);
-
-        int num_elements = 4;
-        int aperture_index = 0;
-        std::vector<float> curv_radii  = {1000.0f, 24.00000000f, -24.00000000f, -168.01068267f};
-        std::vector<float> thicknesses = {0.0f, 3.00000000f, 2.25291824f, 46.74708176f};
-        std::vector<float> elem_radii  = {8.0f, 8.00000000f, 8.00000000f, 8.00000000f};
-        std::vector<DispersiveMaterial<Float, Spectrum>> mats = {
-            air,
-            air,
-            glass_A,
-            glass_B,
-            air,
-        };
-
-        Float z_pos = 0.0f;
-        Float thickness, curv_radius, elem_radius;
-
-        for (int i = num_elements - 1; i >= 0; i--) {
-            elem_radius = elem_radii.at(i);
-            thickness   = thicknesses.at(i);
-            z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    air));
-            } else {
-                curv_radius = curv_radii.at(i);
-                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-                    -0.001f * curv_radius, 
-                    0.001f * elem_radius, 
-                    0.001f * z_pos, 
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            }
-        }
-
-        Float delta = focus_thick_lens(object_distance);
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(-delta);
-        }
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats);
     }
 
     void build_hypercentric_lens(Float ap_radius = 1.0f, Float focal_lengths = 2.0f) {
@@ -1932,18 +1358,12 @@ public:
         }
         m_film_z_position = 0.001f * (track_length - (thicknesses.at(0) + thicknesses.at(1) + thicknesses.at(2)));
 
-        // draw_cross_section(16);
-
         Float shutter_time = dr::sqr(z_ap_to_lens * dr::rcp(ap_radius * (ap_radius + lens_radius)));
         std::cout << "Recommended shutter time: " << shutter_time * 8.0f << "\n";
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
     }
 
 
-    void build_asph_lens(Float object_distance) {
+    void build_asph_lens() {
         // TODO: find some way to deal with the weird aperture (it's currently excluded)
         // Parameters from:
         // https://patents.google.com/patent/US8934179B2/en
@@ -2037,24 +1457,10 @@ public:
                     mats.at(i)));
             }
         }
-
-        // draw_cross_section(16);
-
-        Float delta = focus_thick_lens(object_distance);
-
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(dr::select(dr::isnan(delta), 0.0f, -delta));
-        }
-
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
     }
 
 
-    void build_exp2_nikon(Float object_distance, int mode) {
+    void build_exp2_nikon(int mode) {
         DispersiveMaterial<Float, Spectrum> air = DispersiveMaterial<Float, Spectrum>("Air", 1.000277f, 0.0f);
         DispersiveMaterial<Float, Spectrum> glass_A = DispersiveMaterial<Float, Spectrum>("glass_A", 1.5046464980225065f, 0.004220601200948007f),
                                             glass_B = DispersiveMaterial<Float, Spectrum>("glass_B", 1.8645930283464647f, 0.013233579146425922f),
@@ -2067,16 +1473,39 @@ public:
                                             glass_I = DispersiveMaterial<Float, Spectrum>("glass_I", 1.6738434507974307f, 0.006826218099482183f),
                                             glass_J = DispersiveMaterial<Float, Spectrum>("glass_J", 1.4770641526601842f, 0.00362410356265244f);
 
-        // XXXX
         float scale = 35.0f / 1.57f;
 
+        // size_t num_elements = 22;
+        // int aperture_index = 11;
+        std::vector<InterfaceType> interfaceTypes = {
+            InterfaceType::sphere,    // 1 
+            InterfaceType::sphere,    // 2
+            InterfaceType::sphere,    // 3
+            InterfaceType::sphere,    // 4
+            InterfaceType::sphere,    // 5
+            InterfaceType::sphere,    // 6
+            InterfaceType::sphere,    // 7
+            InterfaceType::sphere,    // 8
+            InterfaceType::sphere,    // 9
+            InterfaceType::sphere,    // 10
+            InterfaceType::sphere,    // 11
+            InterfaceType::aperture,  // 12, aperture
+            InterfaceType::sphere,    // 13
+            InterfaceType::sphere,    // 14
+            InterfaceType::sphere,    // 15
+            InterfaceType::sphere,    // 16
+            InterfaceType::asphere,   // 17, asph
+            InterfaceType::asphere,   // 18, asph
+            InterfaceType::sphere,    // 19,
+            InterfaceType::sphere,    // 20,
+            InterfaceType::plane,     // 21, plano
+            InterfaceType::plane      // 22, plano
+        };
 
-        size_t num_elements = 22;
-        int aperture_index = 11;
         std::vector<float> curv_radii  = { 5.2674f, 0.9607f, 1.442f, 10.2799f, 1.2154f, -1.0987f, 2.9183f, -1.6693f, 1.6429f, -1.4116f, -2.5725f,   1e8,  -0.973f, -24.0801f, 2.3756f, -1.3055f, -7.3169f,  -2.2f, -1.5449f, -7.2572f,   1e8,    1e8   };
         std::vector<float> thicknesses = {  0.102f,  0.309f, 0.246f,   0.083f,  0.411f,   0.088f,  0.258f,   0.009f,  0.379f,   0.069f,   0.118f, 0.604f,  0.051f,    0.009f,  0.282f,   0.239f,   0.122f, 0.154f,   0.083f,    0.75f, 0.074f, 0.0425f };
         std::vector<float> elem_radii  = {  0.847f,  0.696f, 0.661f,   0.625f,  0.546f,   0.524f,  0.586f,   0.601f,  0.624f,   0.613f,   0.607f, 0.555f,  0.476f,     0.49f,  0.543f,   0.569f,   0.604f, 0.627f,   0.662f,   0.712f,   1.2f,    1.2f };
-        // std::vector<float> kappas      = {    0.0,    0.0,   0.0,     , 0.546, 0.524, 0.586, 0.601, 0.624, 0.613, 0.607, 0.555, 0.476, 0.49, 0.543, 0.569, 0.604, 0.627, 0.662, 0.712, 1.2, 1.2 };
+        std::vector<float> kappas      = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 
         std::vector<std::vector<Float>> ai_list = {
             { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // 1
@@ -2142,69 +1571,94 @@ public:
             air,
         };
 
+        m_stopdown_ratio = 0.5f;
+
+        build_lens_from_data(interfaceTypes, thicknesses, curv_radii, elem_radii, kappas, ai_list, mats, scale);
+    }
+
+    void build_lens_from_data(  std::vector<InterfaceType> interfaceTypes, 
+                                std::vector<float> thicknesses,
+                                std::vector<float> curv_radii,
+                                std::vector<float> elem_radii,
+                                std::vector<float> kappas,
+                                std::vector<std::vector<Float>> ai_list,
+                                std::vector<DispersiveMaterial<Float, Spectrum>> mats, 
+                                float scale = 1.0f) {
+
+        size_t num_elements = thicknesses.size();
         std::cout << "Array sizes match: " 
             << (curv_radii.size() == num_elements) << ", "
-            << (thicknesses.size() == num_elements) << ", "
             << (elem_radii.size() == num_elements) << ", "
             << (ai_list.size() == num_elements) << ", "
             << (mats.size() == num_elements + 1) << "\n";
 
-
-
         Float z_pos = 0.0f;
         Float thickness, curv_radius, elem_radius, kappa;
-        std::vector<Float> Ai;
+        std::vector<Float> asph_coefficients;
 
         for (int i = num_elements - 1; i >= 0; i--) {
             elem_radius = elem_radii.at(i);
             thickness   = thicknesses.at(i);
             z_pos += thickness;
-            if (i == aperture_index) {
-                m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
-                    0.001f * scale * elem_radius * 0.5f,   // stop down by 2x
-                    0.001f * scale * z_pos, 
-                    air));
-            } else if (i == 16 || i == 17 || i == 20 || i == 21) {
-                curv_radius = curv_radii.at(i);
-                kappa = 0.0f;
-                Ai = ai_list.at(i);
 
-                for (size_t j = 0; j < Ai.size(); ++j) {
-                    Ai.at(j) = Ai.at(j) / std::pow(scale, 2*j + 3);
+            switch (interfaceTypes[i]) {
+                case InterfaceType::aperture: {
+                    m_interfaces.push_back(new ApertureStop<Float, Spectrum>(
+                        0.001f * scale * elem_radius * m_stopdown_ratio,
+                        0.001f * scale * z_pos, 
+                        mats.at(i + 1)          // air
+                        ));
+                    break;
                 }
+                case InterfaceType::plane: {
+                    m_interfaces.push_back(new PlanoLens<Float, Spectrum>(
+                        0.001f * scale * elem_radius, 
+                        0.001f * scale * z_pos, 
+                        mats.at(i + 1), 
+                        mats.at(i)));
+                    break;
+                }
+                case InterfaceType::asphere: {
+                    curv_radius = curv_radii.at(i);
+                    kappa = kappas.at(i);
+                    asph_coefficients = ai_list.at(i);
 
-                m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(
-                    scale * curv_radius, 
-                    kappa,
-                    0.001f * scale * elem_radius, 
-                    0.001f * scale * z_pos, 
-                    Ai,
-                    mats.at(i + 1), 
-                    mats.at(i)));
-            } else {
-                curv_radius = curv_radii.at(i);
-                m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
-                   -0.001f * scale * curv_radius, 
-                    0.001f * scale * elem_radius, 
-                    0.001f * scale * z_pos, 
-                    mats.at(i + 1), 
-                    mats.at(i)));
+                    for (size_t j = 0; j < asph_coefficients.size(); ++j) {
+                        asph_coefficients.at(j) = asph_coefficients.at(j) / dr::pow(scale, 2*j + 3);
+                    }
+
+                    m_interfaces.push_back(new AsphericalLens<Float, Spectrum>(
+                        scale * curv_radius, 
+                        kappa,
+                        0.001f * scale * elem_radius, 
+                        0.001f * scale * z_pos, 
+                        asph_coefficients,
+                        mats.at(i + 1), 
+                        mats.at(i)));
+                    break;
+                }
+                case InterfaceType::sphere: {
+                    curv_radius = curv_radii.at(i);
+                    m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
+                        -0.001f * scale * curv_radius, 
+                        0.001f * scale * elem_radius, 
+                        0.001f * scale * z_pos, 
+                        mats.at(i + 1), 
+                        mats.at(i)));
+                    break;
+                }
+                default: {
+                    curv_radius = curv_radii.at(i);
+                    m_interfaces.push_back(new SpheroidLens<Float, Spectrum>(
+                        -0.001f * scale * curv_radius, 
+                        0.001f * scale * elem_radius, 
+                        0.001f * scale * z_pos, 
+                        mats.at(i + 1), 
+                        mats.at(i)));
+                    break;
+                }
             }
         }
-
-        // draw_cross_section(32);
-
-        Float delta = focus_thick_lens(object_distance);
-
-        for (const auto &interface : m_interfaces) {
-            interface->offset_along_axis(dr::select(dr::isnan(delta), 0.0f, -delta));
-        }
-
-        std::cout << "Fine focus adjustment: " << delta << std::endl;
-
-        m_rear_element_z = m_interfaces.front()->get_z();
-        m_rear_element_radius = m_interfaces.front()->get_radius();
-        m_lens_terminal_z = m_interfaces.back()->get_z() + dr::abs(m_interfaces.back()->get_radius());
     }
 
 
@@ -2991,6 +2445,7 @@ private:
     Float m_rear_element_z, m_rear_element_radius, m_lens_terminal_z;
     ref<RadicalInverse> m_qmc_sampler;
     Float m_film_z_position;
+    Float m_stopdown_ratio;
     bool m_sample_exit_pupil;
 
 
