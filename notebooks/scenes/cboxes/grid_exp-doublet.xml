@@ -1,0 +1,114 @@
+<scene version="3.0.0">
+    <default name="spp" value="1"/>
+    <default name="resx" value="1024"/>
+    <default name="resy" value="1024"/>
+
+    <default name="max_depth" value="4"/>
+    <default name="integrator" value="path"/>
+    <integrator type='$integrator'>
+        <integer name="max_depth" value="$max_depth"/>
+    </integrator>
+
+    <sensor type="realisticlens" id="sensor">
+        <!-- ======== Select the lens design to use ======== -->
+        <string name="lens_design" value="exp1a"/>
+        <!-- <string name="lens_design" value="exp1b"/> -->
+		<!-- <string name="lens_design" value="gauss"/> -->
+
+        <!-- ======== Control the camera parameters ======== -->
+        <!-- doublet -->
+        <float name="object_distance" value="1.0"/>
+        <!-- gauss -->
+        <!-- <float name="object_distance" value="13.3"/> -->
+		<!-- <boolean name="sample_exit_pupil" value="true"/> -->
+		<boolean name="sample_exit_pupil" value="false"/>
+
+        <!-- ======== Set exposure time ======== -->
+        <float name="shutter_open"  value="0.0"/>
+
+        <!-- doublet -->
+        <float name="shutter_close" value="10.0"/>
+        <transform name="to_world">
+            <lookat origin="0,  0,  -1"
+                    target="0,  0,  -2"
+                    up    ="0,  1,  0"/>
+            <scale x="1" y="1"/>
+        </transform>
+
+        <!-- gauss -->
+        <!-- <float name="shutter_close" value="11.0"/>
+        <transform name="to_world">
+            <lookat origin="0,  0,  11.3"
+                    target="0,  0,  0"
+                    up    ="0,  1,  0"/>
+            <scale x="1" y="1"/>
+        </transform> -->
+
+		<sampler type="independent">
+			<integer name="sample_count" value="$spp" />
+		</sampler>
+		<film type="hdrfilm">
+			<integer name="width" value="$resx" />
+			<integer name="height" value="$resy" />
+			
+			<!-- <float name="diagonal" value="70" /> -->
+			<!-- <float name="diagonal" value="35" /> -->
+			<float name="diagonal" value="49" />
+
+			<string name="file_format" value="openexr" />
+			<string name="pixel_format" value="rgb" />
+			<rfilter type="tent" />
+		</film>
+	</sensor>
+
+    <!-- BSDFs -->
+
+    <bsdf type="diffuse" id="gray">
+        <rgb name="reflectance" value="0.85, 0.85, 0.85"/>
+    </bsdf>
+
+    <!-- Shapes -->
+    <emitter type="constant">
+        <rgb name="radiance" value="1.0"/>
+    </emitter>
+
+    <shape type="rectangle" id="5m">
+        <transform name="to_world">
+            <translate value="0., 0., -2.0"/>
+            <scale value="4.0, 4.0, 1.0"/>
+        </transform>
+        <bsdf type="diffuse">
+
+            <!-- ======== Choose the texture pattern to use ======== -->
+<!-- 
+            <texture name="reflectance" type="comb2d">
+                <transform name="to_uv">
+                    <scale x="8" y="8" />
+                </transform>
+                <rgb name="color0" value="0.0, 0.0, 0.0"/>
+                <rgb name="color1" value="1.0, 1.0, 1.0"/>
+                <float name="linewidth" value="0.05"/>
+            </texture> -->
+
+            <texture name="reflectance" type="checkerlines">
+                <transform name="to_uv">
+                    <scale x="32" y="32" />
+                </transform>
+                <rgb name="color0" value="0.0, 0.0, 0.0"/>
+                <rgb name="color1" value="1.0, 1.0, 1.0"/>
+                <float name="linewidth" value="0.03"/>
+            </texture>
+
+            <!-- <texture name="reflectance" type="polarlines">
+                <transform name="to_uv">
+                    <scale x="8" y="8" />
+                </transform>
+                <rgb name="color0" value="1.0, 1.0, 1.0"/>
+                <rgb name="color1" value="0.0, 0.0, 0.0"/>
+                <integer name="spokes" value="8"/>
+                <float name="linewidth" value="0.05"/>
+            </texture> -->
+        </bsdf>
+    </shape>
+
+</scene>

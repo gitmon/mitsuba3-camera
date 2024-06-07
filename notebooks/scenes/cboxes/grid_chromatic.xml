@@ -1,94 +1,84 @@
 <scene version="3.0.0">
-    <!-- <default name="spp" value="128"/>
-    <default name="res" value="256"/> -->
-
-
-    <!-- for segfault repro -->
-    <!-- <default name="spp" value="16"/>
-    <default name="res" value="1"/> -->
-
-
     <default name="spp" value="1"/>
-    <!-- <default name="res" value="32"/> -->
-    <default name="res" value="256"/>
-    <!-- <default name="res" value="512"/> -->
+    <default name="resx" value="1024"/>
+    <default name="resy" value="1024"/>
 
-
-    <!-- <default name="max_depth" value="1"/> -->
+    <default name="max_depth" value="4"/>
     <default name="integrator" value="path"/>
-    <!-- <default name="integrator" value="aov"/> -->
-
     <integrator type='$integrator'>
-        <!-- <integer name="max_depth" value="$max_depth"/> -->
-        <!-- <string name="aovs" value="nn:sh_normal"/> -->
-        <!-- <string name="aovs" value="dd.y:depth"/> -->
+        <integer name="max_depth" value="$max_depth"/>
     </integrator>
 
     <sensor type="realisticlens" id="sensor">
-    <!-- <sensor type="thinlens" id="sensor"> -->
-        <float name="object_distance" value="6.0"/>
-        <!-- <float name="lens_diameter" value="0.08"/> -->
-        <string name="lens_design" value="singlet"/>
+        <!-- ======== Select the lens design to use ======== -->
+        <!-- <string name="lens_design" value="singlet"/> -->
         <!-- <string name="lens_design" value="flipped_doublet"/> -->
         <!-- <string name="lens_design" value="doublet"/> -->
-        <!-- <string name="lens_design" value="tessar"/> -->
+        <!-- <float name="lens_diameter" value="0.08"/> -->
 
 
-        <string name="fov_axis" value="smaller"/>
-        <float name="near_clip" value="0.001"/>
-        <float name="far_clip" value="100.0"/>
-        <float name="focus_distance" value="4.5"/>
-        <float name="fov" value="39.3077"/>
-        <float name="aperture_radius" value="0.2"/>
+		<!-- <string name="lens_design" value="tessar"/> -->
+		<string name="lens_design" value="helios"/>
+		<!-- <string name="lens_design" value="jupiter"/> -->
+		<!-- <string name="lens_design" value="fisheye"/> -->
+		<!-- <string name="lens_design" value="gauss"/> -->
+		<!-- <string name="lens_design" value="asph"/> -->
+		<!-- <string name="lens_design" value="exp1c"/> -->
+
+        <!-- ======== Control the camera parameters ======== -->
+        <!-- <float name="object_distance" value="8.0"/> -->
+        <!-- <float name="object_distance" value="2.0"/> -->
+        <!-- <float name="object_distance" value="1.0"/> -->
+        <float name="object_distance" value="6.0"/>
+		<!-- <boolean name="sample_exit_pupil" value="true"/> -->
+		<boolean name="sample_exit_pupil" value="false"/>
+
+        <!-- ======== Set exposure time ======== -->
+        <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="30.0"/>
+
+		<!-- <float name="fov" value="35" /> -->
         <transform name="to_world">
             <lookat origin="0,  0,  4"
                     target="0,  0,  0"
                     up    ="0,  1,  0"/>
+            <scale x="1" y="1"/>
         </transform>
-        <sampler type="independent">
-            <integer name="sample_count" value="$spp"/>
-        </sampler>
-        <film type="hdrfilm">
-            <integer name="width"  value="$res"/>
-            <integer name="height" value="$res"/>
+		<sampler type="independent">
+			<integer name="sample_count" value="$spp" />
+		</sampler>
+		<film type="hdrfilm">
+			<integer name="width" value="$resx" />
+			<integer name="height" value="$resy" />
+			
+			<!-- singlet, doublet, helios -->
+			<!-- <float name="diagonal" value="70" /> -->
+			<!-- <float name="diagonal" value="35" /> -->
+			<!-- <float name="diagonal" value="42" /> -->
 
-            <!-- <integer name="crop_width"  value="3"/>
-            <integer name="crop_height" value="3"/>
-            <integer name="crop_offset_x"  value="10"/>
-            <integer name="crop_offset_y" value="22"/> -->
+			<!-- asphere -->
+			<!-- <float name="diagonal" value="5.7" /> -->
 
-            <!-- <integer name="crop_width"  value="4"/>
-            <integer name="crop_height" value="4"/>
-            <integer name="crop_offset_x"  value="37"/>
-            <integer name="crop_offset_y" value="90"/> -->
+			<!-- fisheye -->
+			<float name="diagonal" value="55" />
 
-            <rfilter type="tent"/>
-            <string name="pixel_format" value="rgb"/>
-            <string name="component_format" value="float32"/>
-        </film>
-    </sensor>
+			<!-- jupiter -->
+			<!-- <float name="diagonal" value="110" /> -->
+
+			<!-- for tessar -->
+			<!-- <float name="diagonal" value="200" /> -->
+
+			<string name="file_format" value="openexr" />
+			<string name="pixel_format" value="rgb" />
+			<rfilter type="tent" />
+		</film>
+	</sensor>
 
     <!-- BSDFs -->
 
     <bsdf type="diffuse" id="gray">
         <rgb name="reflectance" value="0.85, 0.85, 0.85"/>
     </bsdf>
-
-    <bsdf type="diffuse" id="white">
-        <rgb name="reflectance" value="0.885809, 0.698859, 0.666422"/>
-    </bsdf>
-
-    <bsdf type="diffuse" id="green">
-        <rgb name="reflectance" value="0.105421, 0.37798, 0.076425"/>
-    </bsdf>
-
-    <bsdf type="diffuse" id="red">
-        <rgb name="reflectance" value="0.570068, 0.0430135, 0.0443706"/>
-    </bsdf>
-
-    <bsdf type="dielectric" id="glass"/>
-
-    <bsdf type="conductor" id="mirror"/>
 
     <!-- Light -->
 
@@ -111,16 +101,19 @@
     <shape type="rectangle" id="5m">
         <transform name="to_world">
             <translate value="0., 0., -2.0"/>
-            <scale value="1.5, 1.5, 1.0"/>
+            <scale value="2.0, 2.0, 1.0"/>
         </transform>
         <bsdf type="diffuse">
-            <!-- <texture name="reflectance" type="checkerboard">
+
+            <!-- ======== Choose the texture pattern to use ======== -->
+
+            <texture name="reflectance" type="checkerboard">
                 <transform name="to_uv">
                     <scale x="8" y="8" />
                 </transform>
                 <rgb name="color0" value="0.03, 0.03, 0.03"/>
                 <rgb name="color1" value="0.95, 0.95, 0.95"/>
-            </texture> -->
+            </texture>
 
             <!-- <texture name="reflectance" type="checkerlines">
                 <transform name="to_uv">
@@ -128,6 +121,15 @@
                 </transform>
                 <rgb name="color0" value="1.0, 1.0, 1.0"/>
                 <rgb name="color1" value="0.0, 0.0, 0.0"/>
+                <float name="linewidth" value="0.02"/>
+            </texture> -->
+
+            <!-- <texture name="reflectance" type="checkerlines">
+                <transform name="to_uv">
+                    <scale x="8" y="8" />
+                </transform>
+                <rgb name="color1" value="1.0, 1.0, 1.0"/>
+                <rgb name="color0" value="0.0, 0.0, 0.0"/>
                 <float name="linewidth" value="0.05"/>
             </texture> -->
 
@@ -146,7 +148,7 @@
                 <integer name="spokes" value="64"/>
             </texture> -->
 
-            <texture name="reflectance" type="polarlines">
+            <!-- <texture name="reflectance" type="polarlines">
                 <transform name="to_uv">
                     <scale x="8" y="8" />
                 </transform>
@@ -154,7 +156,7 @@
                 <rgb name="color1" value="0.0, 0.0, 0.0"/>
                 <integer name="spokes" value="8"/>
                 <float name="linewidth" value="0.05"/>
-            </texture>
+            </texture> -->
         </bsdf>
     </shape>
 

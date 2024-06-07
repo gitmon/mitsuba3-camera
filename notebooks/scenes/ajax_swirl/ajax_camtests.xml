@@ -1,0 +1,116 @@
+<scene version="2.1.0">
+
+<!-- Defaults, these can be set via the command line: -Darg=value -->
+
+	<default name="spp" value="64"/>
+	<default name="resx" value="1440"/>
+	<default name="resy" value="1080"/>
+
+<!-- Camera and Rendering Parameters -->
+
+	<integrator type="path" id="elm__0" name="elm__0">
+		<integer name="max_depth" value="12"/>
+	</integrator>
+    <sensor type="realisticlens" id="sensor">
+        <!-- ======== Select the lens design to use ======== -->
+		<!-- <string name="lens_design" value="tessar"/> -->
+		<!-- <string name="lens_design" value="helios"/> -->
+		<!-- <string name="lens_design" value="jupiter"/> -->
+		<!-- <string name="lens_design" value="fisheye"/> -->
+		<!-- <string name="lens_design" value="exp1a"/> -->
+		<!-- <string name="lens_design" value="exp1b"/> -->
+		<string name="lens_design" value="exp2c"/>
+
+        <!-- ======== Control the camera parameters ======== -->
+        <!-- <float name="object_distance" value="1.3"/> -->
+        <float name="object_distance" value="100"/>
+		<boolean name="sample_exit_pupil" value="true"/>
+		<!-- <boolean name="sample_exit_pupil" value="false"/> -->
+
+        <!-- ======== Set exposure time ======== -->
+        <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="4.0"/>
+
+		<transform name="to_world">
+			<rotate x="1" angle="-0.7357714028081925"/>
+			<rotate y="1" angle="86.82496174804106"/>
+			<rotate z="1" angle="13.198303236069446"/>
+			<!-- <translate value="-1.209862 -0.286526 -0.104191"/> -->
+			<translate value="-0.609862 -0.186526 -0.104191"/>
+		</transform>
+		<sampler type="independent">
+			<integer name="sample_count" value="$spp" />
+		</sampler>
+		<film type="hdrfilm">
+			<integer name="width" value="$resx" />
+			<integer name="height" value="$resy" />
+
+			<!-- <float name="diagonal" value="2." /> -->
+
+			<!-- singlet, doublet, helios -->
+			<float name="diagonal" value="49" />
+
+			<!-- fisheye -->
+			<!-- <float name="diagonal" value="55" /> -->
+
+			<!-- jupiter -->
+			<!-- <float name="diagonal" value="110" /> -->
+
+			<!-- for tessar -->
+			<!-- <float name="diagonal" value="200" /> -->
+
+			<string name="file_format" value="openexr" />
+			<string name="pixel_format" value="rgb" />
+			<rfilter type="tent" />
+		</film>
+	</sensor>
+
+<!-- Materials -->
+
+	<bsdf type="twosided" id="mat-surface" name="mat-surface">
+		<bsdf type="principled" name="bsdf">
+			<rgb value="0.800000 0.800000 0.800000" name="base_color"/>
+			<float name="spec_tint" value="0.000000"/>
+			<float name="spec_trans" value="0.000000"/>
+			<float name="metallic" value="0.000000"/>
+			<float name="anisotropic" value="0.000000"/>
+			<float name="roughness" value="1.000000"/>
+			<float name="sheen" value="0.000000"/>
+			<float name="sheen_tint" value="0.500000"/>
+			<float name="clearcoat" value="0.000000"/>
+			<float name="clearcoat_gloss" value="0.000900"/>
+			<float name="specular" value="0.001000"/>
+		</bsdf>
+	</bsdf>
+
+<!-- Emitters -->
+
+	<emitter type="envmap" id="elm__1" name="elm__1">
+		<string name="filename" value="textures/green_sanctuary_2k.exr"/>
+		<float name="scale" value="1.000000"/>
+		<transform name="to_world">
+			<matrix value="0.000000 0.000000 1.000000 0.000000 0.000000 1.000000 0.000000 0.000000 -1.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 1.000000"/>
+		</transform>
+	</emitter>
+	<shape type="rectangle" id="elm__3" name="elm__3">
+		<boolean name="flip_normals" value="true"/>
+		<transform name="to_world">
+			<matrix value="0.040921 0.059849 -0.035916 0.277688 0.056079 -0.003402 0.058223 0.871034 0.041557 -0.054341 -0.043202 -0.368894 0.000000 0.000000 0.000000 1.000000"/>
+		</transform>
+		<emitter type="area" name="emitter">
+			<rgb value="46.781883 46.781883 46.781883" name="radiance"/>
+		</emitter>
+		<bsdf type="null" name="bsdf"/>
+	</shape>
+
+<!-- Shapes -->
+
+	<shape type="ply" id="elm__5" name="elm__5">
+		<string name="filename" value="meshes/IndexedFaceSete.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-surface" name="bsdf"/>
+	</shape>
+
+<!-- Volumes -->
+
+</scene>

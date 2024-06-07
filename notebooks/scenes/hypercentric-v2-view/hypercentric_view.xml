@@ -1,0 +1,189 @@
+<scene version="2.1.0">
+
+<!-- Defaults, these can be set via the command line: -Darg=value -->
+
+	<default name="spp" value="64"/>
+	<default name="resx" value="1024"/>
+	<default name="resy" value="1024"/>
+	<!-- hypercentric lens -->
+	<default name="lens" value="hypercentric"/>
+	<default name="film_diagonal" value="10"/>
+
+	<!-- helios -->
+	<!-- <default name="lens" value="tessar"/>
+	<default name="film_diagonal" value="200"/>
+	<default name="object_distance" value="0.52"/> -->
+	<default name="object_distance" value="2.0"/>
+
+<!-- Camera and Rendering Parameters -->
+
+	<integrator type="path" id="elm__0" name="elm__0">
+		<integer name="max_depth" value="12"/>
+	</integrator>
+
+	<sensor type="realisticlens" id="elm__2" name="elm__2">
+		<string name="lens_design" value="$lens"/>
+        <float name="object_distance" value="$object_distance"/>
+		<boolean name="sample_exit_pupil" value="true"/>
+        <!-- <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="140.0"/> -->
+
+		<!-- at the focal point -->
+        <!-- <float name="ap_offset" value="1.0"/> -->
+        <float name="ap_offset" value="0.9"/>
+        <float name="ap_size" value="0.02"/>
+        <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="50000.0"/>
+        <!-- <float name="ap_size" value="0.08"/>
+        <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="3128.0"/> -->
+
+
+		<!-- at the hypercentric point -->
+        <!-- <float name="ap_offset" value="2"/>
+        <float name="ap_size" value="0.02"/>
+        <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="222000.0"/> -->
+
+		<!-- 1.5 focal lengths -->
+        <!-- <float name="ap_offset" value="1.5"/>
+        <float name="ap_size" value="0.02"/>
+        <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="137767.0"/> -->
+
+		<!-- 0.5 focal lengths -->
+        <!-- <float name="ap_offset" value="0.5"/>
+        <float name="ap_size" value="0.02"/>
+        <float name="shutter_open"  value="0.0"/>
+        <float name="shutter_close" value="15307.0"/> -->
+
+
+		<float name="near_clip" value="0.00100000"/>
+		<float name="far_clip" value="1.000000"/>
+		
+		<transform name="to_world">
+			<rotate x="1" angle="-149.99999734394112"/>
+			<rotate y="1" angle="45.00000808242825"/>
+			<rotate z="1" angle="-179.999991348578"/>
+			<translate value="0.232634 0.706272 0.375024"/>
+		</transform>
+
+		<sampler type="independent" name="sampler">
+			<integer name="sample_count" value="$spp"/>
+		</sampler>
+		<film type="hdrfilm" name="film">
+			<float name="diagonal" value="$film_diagonal" />
+			<integer name="width" value="$resx"/>
+			<integer name="height" value="$resy"/>
+		</film>
+	</sensor>
+
+
+<!-- Materials -->
+
+	<bsdf type="twosided" id="mat-Material.001" name="mat-Material.001">
+		<bsdf type="diffuse" name="bsdf">
+			<rgb value="0.800000 0.169080 0.144096" name="reflectance"/>
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="mat-Material.002" name="mat-Material.002">
+		<bsdf type="diffuse" name="bsdf">
+			<rgb value="0.058511 0.134003 0.800000" name="reflectance"/>
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="mat-Material.003" name="mat-Material.003">
+		<bsdf type="roughconductor" name="bsdf">
+			<float name="alpha" value="0.159266"/>
+			<string name="distribution" value="ggx"/>
+			<rgb value="0.487803 0.487803 0.487803" name="specular_reflectance"/>
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="mat-Material.004" name="mat-Material.004">
+		<bsdf type="diffuse" name="bsdf">
+			<rgb value="0.800000 0.169080 0.144096" name="reflectance"/>
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="mat-Material.008" name="mat-Material.008">
+		<bsdf type="diffuse" name="bsdf">
+			<rgb value="0.058511 0.134003 0.800000" name="reflectance"/>
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="mat-Material.009" name="mat-Material.009">
+		<bsdf type="diffuse" name="bsdf">
+			<rgb value="0.058511 0.134003 0.800000" name="reflectance"/>
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="mat-Material.010" name="mat-Material.010">
+		<bsdf type="roughconductor" name="bsdf">
+			<float name="alpha" value="0.159266"/>
+			<string name="distribution" value="ggx"/>
+			<rgb value="0.487803 0.487803 0.487803" name="specular_reflectance"/>
+		</bsdf>
+	</bsdf>
+
+<!-- Emitters -->
+
+	<emitter type="envmap" id="elm__1" name="elm__1">
+		<string name="filename" value="textures/green_sanctuary_2k.exr"/>
+		<float name="scale" value="1.000000"/>
+		<transform name="to_world">
+			<matrix value="0.000000 0.000000 1.000000 0.000000 0.000000 1.000000 0.000000 0.000000 -1.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 1.000000"/>
+		</transform>
+	</emitter>
+	<shape type="rectangle" id="elm__6" name="elm__6">
+		<boolean name="flip_normals" value="true"/>
+		<transform name="to_world">
+			<matrix value="0.040921 0.059849 -0.035916 0.277688 0.056079 -0.003402 0.058223 0.871034 0.041557 -0.054341 -0.043202 -0.368894 0.000000 0.000000 0.000000 1.000000"/>
+		</transform>
+		<emitter type="area" name="emitter">
+			<rgb value="46.781883 46.781883 46.781883" name="radiance"/>
+		</emitter>
+		<bsdf type="null" name="bsdf"/>
+	</shape>
+
+<!-- Shapes -->
+
+	<shape type="ply" id="elm__3" name="elm__3">
+		<string name="filename" value="meshes/red_cube.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.001" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="elm__5" name="elm__5">
+		<string name="filename" value="meshes/blue_cube.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.002" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="elm__8" name="elm__8">
+		<string name="filename" value="meshes/base.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.003" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="elm__10" name="elm__10">
+		<string name="filename" value="meshes/blue_cube_001.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.004" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="elm__11" name="elm__11">
+		<string name="filename" value="meshes/blue_cube_002.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.004" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="elm__13" name="elm__13">
+		<string name="filename" value="meshes/blue_cube_003.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.008" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="elm__15" name="elm__15">
+		<string name="filename" value="meshes/blue_cube_004.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.009" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="elm__18" name="elm__18">
+		<string name="filename" value="meshes/base_001.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="mat-Material.010" name="bsdf"/>
+	</shape>
+
+<!-- Volumes -->
+
+</scene>
